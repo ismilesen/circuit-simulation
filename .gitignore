@@ -1,0 +1,38 @@
+# Godot
+.godot/
+*.uid
+*.import
+
+# Build artifacts
+*.obj
+*.o
+*.dll
+*.so
+*.dylib
+*.wasm
+*.exp
+*.lib
+*.pdb
+.sconsign.dblite
+*.os
+
+# Binaries in project/bin/ (built by scons)
+project/bin/*.dll
+project/bin/*.so
+project/bin/*.dylib
+project/bin/*.wasm
+project/bin/*.exp
+project/bin/*.lib
+
+# Export
+export_presets.cfg
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
