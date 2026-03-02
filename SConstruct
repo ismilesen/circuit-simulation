@@ -8,6 +8,8 @@ env.Append(CPPPATH=["src/"])
 
 # ngspice headers — uncomment and adjust if you have ngspice installed locally:
 # env.Append(CPPPATH=["path/to/ngspice/include/"])
+env.Append(CPPPATH=["ngspice"])
+env.Append(LIBPATH=["ngspice/"])
 
 # Source files
 sources = Glob("src/*.cpp")

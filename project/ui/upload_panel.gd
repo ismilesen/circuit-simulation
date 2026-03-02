@@ -3,19 +3,24 @@ extends Control
 @export var simulator_path: NodePath = NodePath("..")
 const UPLOAD_DIR := "user://uploads"
 
-signal schematic_requested(path: String)
-
 var NETLIST_EXTS: PackedStringArray = PackedStringArray(["spice", "cir", "net", "txt"])
-var XSCHEM_EXTS: PackedStringArray = PackedStringArray(["sch"])
+var XSCHEM_EXTS: PackedStringArray = PackedStringArray(["sch", "sym"])
 
 @onready var upload_button: Button = $Margin/VBox/ControlsRow/UploadButton
 @onready var run_button: Button = $Margin/VBox/ControlsRow/RunButton
 @onready var clear_button: Button = $Margin/VBox/ControlsRow/ClearButton
+@onready var save_ws_button: Button = $Margin/VBox/ControlsRow/SaveWorkspaceButton
+@onready var load_ws_button: Button = $Margin/VBox/ControlsRow/LoadWorkspaceButton
+
 @onready var staged_list: ItemList = $Margin/VBox/StagedList
-@onready var status_prefix: Label = $Margin/VBox/StatusRow/StatusPrefix
-@onready var status_value: Label = $Margin/VBox/StatusRow/StatusValue
+
+@onready var status_bar: PanelContainer = $Margin/VBox/StatusBar
+@onready var status_prefix: Label = $Margin/VBox/StatusBar/StatusRow/StatusPrefix
+@onready var status_value: Label = $Margin/VBox/StatusBar/StatusRow/StatusValue
+
 @onready var output_box: RichTextLabel = $Margin/VBox/Output
 @onready var file_dialog: FileDialog = $FileDialog
+@onready var workspace_dialog: FileDialog = $WorkspaceDialog
 
 @onready var drop_zone: PanelContainer = $Margin/VBox/DropZone
 @onready var drop_title: Label = $Margin/VBox/DropZone/DropZoneMargin/DropZoneVBox/DropTitle
@@ -24,6 +29,7 @@ var XSCHEM_EXTS: PackedStringArray = PackedStringArray(["sch"])
 # Each entry:
 # { "display": String, "user_path": String, "bytes": int, "kind": String, "ext": String }
 var staged: Array[Dictionary] = []
+
 var _sim_signal_connected: bool = false
 var _sim: Node = null
 
@@ -33,45 +39,49 @@ var _sb_panel: StyleBoxFlat = null
 var _sb_panel_hover: StyleBoxFlat = null
 var _sb_drop_idle: StyleBoxFlat = null
 var _sb_drop_flash: StyleBoxFlat = null
+var _sb_status_bar: StyleBoxFlat = null
 
 enum StatusTone { IDLE, OK, WARN, ERROR }
 
-func _on_native_file_selected(path: String) -> void:
-	if path.strip_edges() == "":
-		return
-	var added: int = int(_stage_native_file(path))
-	if added > 0:
-		_flash_drop_zone()
-		_refresh_status("native: staged 1 file", StatusTone.OK)
-
+var _ws_mode: String = "" # "save" or "load"
 
 func _ready() -> void:
 	_apply_light_theme()
 	_ensure_upload_dir()
 
-	upload_button.pressed.connect(_on_upload_pressed)
-	run_button.pressed.connect(_on_run_pressed)
-	clear_button.pressed.connect(_on_clear_pressed)
-	staged_list.item_activated.connect(_on_staged_item_activated)
-	file_dialog.file_selected.connect(_on_native_file_selected)
-	file_dialog.files_selected.connect(_on_native_files_selected)
+	# --- FileDialog setup (critical: OPEN_FILES, not SAVE_FILE) ---
+	# Godot 4.3: FILE_MODE_OPEN_FILES = 1, FILE_MODE_SAVE_FILE = 4. :contentReference[oaicite:1]{index=1}
+	file_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILES
+	file_dialog.use_native_dialog = true
+	file_dialog.clear_filters()
+	file_dialog.add_filter("*.spice, *.cir, *.net, *.txt ; Netlists")
+	file_dialog.add_filter("*.sch ; Xschem schematics")
+	file_dialog.add_filter("* ; All files")
 
-	# OS drag-and-drop (IMPORTANT):
-	# Docs show connecting via the main viewport for file drops. :contentReference[oaicite:2]{index=2}
-	# On Windows, when running from the editor, drag-drop can be intercepted by the editor UI,
-	# so the most reliable test is in an exported .exe.
+	upload_button.pressed.connect(Callable(self, "_on_upload_pressed"))
+	run_button.pressed.connect(Callable(self, "_on_run_pressed"))
+	clear_button.pressed.connect(Callable(self, "_on_clear_pressed"))
+
+	save_ws_button.pressed.connect(Callable(self, "_on_save_workspace_pressed"))
+	load_ws_button.pressed.connect(Callable(self, "_on_load_workspace_pressed"))
+
+	# Use only files_selected for multi-select; keep file_selected as a fallback.
+	file_dialog.files_selected.connect(Callable(self, "_on_native_files_selected"))
+	file_dialog.file_selected.connect(Callable(self, "_on_native_file_selected"))
+
+	workspace_dialog.file_selected.connect(Callable(self, "_on_workspace_dialog_file_selected"))
+
+	# OS drag-and-drop signal (best-effort).
+	# In-editor on Windows this often won’t behave like an exported exe.
 	if not OS.has_feature("web"):
 		if get_viewport() != null:
-			if not get_viewport().files_dropped.is_connected(_on_os_files_dropped):
-				get_viewport().files_dropped.connect(_on_os_files_dropped)
-
-		var w: Window = get_window()
-		if w != null:
-			if not w.files_dropped.is_connected(_on_os_files_dropped):
-				w.files_dropped.connect(_on_os_files_dropped)
+			# This exists in Godot 4.x and is commonly used for OS file drops. :contentReference[oaicite:2]{index=2}
+			if not get_viewport().files_dropped.is_connected(Callable(self, "_on_os_files_dropped")):
+				get_viewport().files_dropped.connect(Callable(self, "_on_os_files_dropped"))
 
 		if Engine.is_editor_hint():
-			_log("[color=yellow]Note:[/color] In the editor, Windows drag-drop often targets the editor window instead of the running game. Export and run the .exe to test OS drag-drop reliably.")
+			_log("[color=yellow]Note:[/color] On Windows, OS drag-drop is often captured by the editor. Export and run the .exe to test drag-drop reliably.")
 
 	_sim = _resolve_simulator()
 	_refresh_status("idle", StatusTone.IDLE)
@@ -103,24 +113,34 @@ func _on_upload_pressed() -> void:
 		file_dialog.popup_centered_ratio(0.8)
 		_refresh_status("native: file dialog opened", StatusTone.WARN)
 
+func _on_native_file_selected(path: String) -> void:
+	if path.strip_edges() == "":
+		return
+	var ok: bool = _stage_native_file(path)
+	if ok:
+		_flash_drop_zone()
+		_refresh_status("native: staged 1 file", StatusTone.OK)
+
 func _on_native_files_selected(paths: PackedStringArray) -> void:
 	if paths.is_empty():
 		return
 	var added: int = 0
 	for p: String in paths:
+		if p.strip_edges() == "":
+			continue
 		added += int(_stage_native_file(p))
-	_flash_drop_zone()
-	_refresh_status("native: staged %d file(s)" % added, StatusTone.OK)
+	if added > 0:
+		_flash_drop_zone()
+		_refresh_status("native: staged %d file(s)" % added, StatusTone.OK)
+	else:
+		_refresh_status("native: no valid files selected", StatusTone.WARN)
 
 func _on_os_files_dropped(files: PackedStringArray) -> void:
-	# OS-level drag-and-drop from Explorer/Finder/etc.
-	# Note: only works with native windows (main window / non-embedded). :contentReference[oaicite:3]{index=3}
 	if OS.has_feature("web"):
 		return
 	if files.is_empty():
 		return
 
-	# Defensive: sometimes editor passes weird strings, ignore empties.
 	var added: int = 0
 	for p: String in files:
 		if p.strip_edges() == "":
@@ -226,32 +246,22 @@ func _web_eval_bool(expr: String) -> bool:
 	return bool(v)
 
 # -------------------------------------------------------------------
-# Run simulation
+# Run simulation (native only)
 # -------------------------------------------------------------------
 
 func _on_run_pressed() -> void:
 	if staged.is_empty():
-		_set_error("No staged files. Upload a file first.")
+		_set_error("No staged files. Upload a .spice/.cir/.net/.txt netlist first.")
 		return
 
 	var idx: PackedInt32Array = staged_list.get_selected_items()
 	if idx.is_empty():
-		_set_error("Select a staged file in the list first.")
+		_set_error("Select a staged netlist in the list first.")
 		return
 
 	var entry: Dictionary = staged[int(idx[0])]
-
-	# .sch files -> visualize instead of simulate
-	if _is_schematic_entry(entry):
-		var sch_path: String = str(entry["user_path"])
-		_log("[color=lime]Visualizing schematic:[/color] %s" % str(entry["display"]))
-		_refresh_status("loading schematic…", StatusTone.WARN)
-		schematic_requested.emit(sch_path)
-		_refresh_status("schematic loaded", StatusTone.OK)
-		return
-
 	if not _is_netlist_entry(entry):
-		_set_error("Selected file is not a supported type. Choose .sch or .spice/.cir/.net/.txt.")
+		_set_error("Selected file is not a netlist type. Choose .spice/.cir/.net/.txt.")
 		return
 
 	if OS.has_feature("web"):
@@ -290,16 +300,192 @@ func _on_sim_finished() -> void:
 	_log("[color=lime]Simulation finished.[/color]")
 
 # -------------------------------------------------------------------
-# Clear staging
+# Workspace save/load (native only)
 # -------------------------------------------------------------------
 
-func _on_staged_item_activated(index: int) -> void:
-	if index < 0 or index >= staged.size():
+func _on_save_workspace_pressed() -> void:
+	if OS.has_feature("web"):
+		_set_error("Web: Save Workspace not implemented yet (browser filesystem differs).")
 		return
-	# Select the item and trigger run (handles .sch vs netlist automatically)
-	staged_list.select(index)
-	_on_run_pressed()
+	if staged.is_empty():
+		_set_error("Nothing to save: stage at least one file first.")
+		return
 
+	_ws_mode = "save"
+	workspace_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	workspace_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+	workspace_dialog.use_native_dialog = true
+	workspace_dialog.clear_filters()
+	workspace_dialog.add_filter("*.cvw.json ; Circuit Visualizer Workspace")
+	workspace_dialog.current_file = "workspace.cvw.json"
+	workspace_dialog.popup_centered_ratio(0.8)
+	_refresh_status("choose workspace save location…", StatusTone.WARN)
+
+func _on_load_workspace_pressed() -> void:
+	if OS.has_feature("web"):
+		_set_error("Web: Load Workspace not implemented yet (browser filesystem differs).")
+		return
+
+	_ws_mode = "load"
+	workspace_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	workspace_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	workspace_dialog.use_native_dialog = true
+	workspace_dialog.clear_filters()
+	workspace_dialog.add_filter("*.cvw.json ; Circuit Visualizer Workspace")
+	workspace_dialog.popup_centered_ratio(0.8)
+	_refresh_status("choose workspace file to load…", StatusTone.WARN)
+
+func _on_workspace_dialog_file_selected(path: String) -> void:
+	if path.strip_edges() == "":
+		return
+	if _ws_mode == "save":
+		_save_workspace_to(path)
+	elif _ws_mode == "load":
+		_load_workspace_from(path)
+
+func _save_workspace_to(manifest_path: String) -> void:
+	if not manifest_path.ends_with(".cvw.json"):
+		manifest_path += ".cvw.json"
+
+	var base_dir: String = manifest_path.get_base_dir()
+	var stem: String = manifest_path.get_file().trim_suffix(".cvw.json")
+	var files_dir: String = base_dir.path_join(stem + "_files")
+
+	DirAccess.make_dir_recursive_absolute(files_dir)
+
+	var items: Array = []
+	for e: Dictionary in staged:
+		var display: String = str(e.get("display", "file.bin"))
+		var user_path: String = str(e.get("user_path", ""))
+
+		var src_abs: String = ProjectSettings.globalize_path(user_path)
+		var dst_abs: String = files_dir.path_join(display)
+		dst_abs = _avoid_collision_abs(dst_abs)
+
+		var ok: bool = _copy_file_abs(src_abs, dst_abs)
+		if not ok:
+			_set_error("Failed copying: %s → %s" % [src_abs, dst_abs])
+			return
+
+		items.append({
+			"name": display,
+			"rel_path": stem + "_files/" + dst_abs.get_file(),
+			"bytes": int(e.get("bytes", 0)),
+			"kind": str(e.get("kind", "unknown")),
+			"ext": str(e.get("ext", ""))
+		})
+
+	var manifest: Dictionary = {
+		"format": "circuit-visualizer-workspace",
+		"version": 1,
+		"created_unix": int(Time.get_unix_time_from_system()),
+		"files_dir": stem + "_files",
+		"items": items
+	}
+
+	var json_text: String = JSON.stringify(manifest, "\t")
+	var f := FileAccess.open(manifest_path, FileAccess.WRITE)
+	if f == null:
+		_set_error("Could not write manifest: %s" % manifest_path)
+		return
+	f.store_string(json_text)
+	f.close()
+
+	_refresh_status("workspace saved: %s" % manifest_path.get_file(), StatusTone.OK)
+	_log("[color=lime]Saved workspace[/color] %s" % manifest_path)
+
+func _load_workspace_from(manifest_path: String) -> void:
+	if not FileAccess.file_exists(manifest_path):
+		_set_error("Manifest not found: %s" % manifest_path)
+		return
+
+	var text := FileAccess.get_file_as_string(manifest_path)
+	var parsed: Variant = JSON.parse_string(text)
+	if parsed == null or typeof(parsed) != TYPE_DICTIONARY:
+		_set_error("Invalid workspace JSON.")
+		return
+
+	var m := parsed as Dictionary
+	if str(m.get("format", "")) != "circuit-visualizer-workspace":
+		_set_error("Not a circuit-visualizer workspace manifest.")
+		return
+
+	var items_var: Variant = m.get("items", [])
+	if typeof(items_var) != TYPE_ARRAY:
+		_set_error("Workspace manifest missing items[].")
+		return
+
+	_on_clear_pressed()
+	_ensure_upload_dir()
+
+	var base_dir := manifest_path.get_base_dir()
+	var items: Array = items_var as Array
+	var added := 0
+
+	for it_var in items:
+		if typeof(it_var) != TYPE_DICTIONARY:
+			continue
+		var it := it_var as Dictionary
+		var rel: String = str(it.get("rel_path", ""))
+		if rel == "":
+			continue
+
+		var abs_src: String = base_dir.path_join(rel)
+		if not FileAccess.file_exists(abs_src):
+			_log("[color=yellow]Missing file:[/color] %s" % abs_src)
+			continue
+
+		var fa := FileAccess.open(abs_src, FileAccess.READ)
+		if fa == null:
+			_log("[color=yellow]Could not open:[/color] %s" % abs_src)
+			continue
+
+		var bytes: PackedByteArray = fa.get_buffer(fa.get_length())
+		fa.close()
+
+		var name: String = str(it.get("name", abs_src.get_file()))
+		if _stage_bytes(name, bytes):
+			added += 1
+
+	_refresh_status("workspace loaded: %d file(s)" % added, StatusTone.OK)
+	_log("[color=lime]Loaded workspace[/color] %s" % manifest_path)
+
+# --- helpers (absolute-path versions) ---
+
+func _copy_file_abs(src_abs: String, dst_abs: String) -> bool:
+	if not FileAccess.file_exists(src_abs):
+		return false
+
+	var src := FileAccess.open(src_abs, FileAccess.READ)
+	if src == null:
+		return false
+
+	var bytes := src.get_buffer(src.get_length())
+	src.close()
+
+	DirAccess.make_dir_recursive_absolute(dst_abs.get_base_dir())
+	var dst := FileAccess.open(dst_abs, FileAccess.WRITE)
+	if dst == null:
+		return false
+
+	dst.store_buffer(bytes)
+	dst.close()
+	return true
+
+func _avoid_collision_abs(dst_abs: String) -> String:
+	if not FileAccess.file_exists(dst_abs):
+		return dst_abs
+
+	var base := dst_abs.get_basename()
+	var ext := dst_abs.get_extension()
+	var stamp := int(Time.get_unix_time_from_system())
+	if ext == "":
+		return "%s_%d" % [base, stamp]
+	return "%s_%d.%s" % [base, stamp, ext]
+
+# -------------------------------------------------------------------
+# Clear staging
+# -------------------------------------------------------------------
 
 func _on_clear_pressed() -> void:
 	staged.clear()
@@ -366,9 +552,6 @@ func _detect_kind(ext: String, bytes: PackedByteArray) -> String:
 func _is_netlist_entry(entry: Dictionary) -> bool:
 	return entry.has("ext") and NETLIST_EXTS.has(str(entry["ext"]))
 
-func _is_schematic_entry(entry: Dictionary) -> bool:
-	return entry.has("ext") and XSCHEM_EXTS.has(str(entry["ext"]))
-
 func _bytes_head_as_text(bytes: PackedByteArray, n: int) -> String:
 	var slice: PackedByteArray = bytes.slice(0, min(n, bytes.size()))
 	return slice.get_string_from_utf8()
@@ -392,13 +575,7 @@ func _human_size(n: int) -> String:
 	return "%.2f MB" % (float(n) / (1024.0 * 1024.0))
 
 func _refresh_status(msg: String, tone: StatusTone = StatusTone.IDLE) -> void:
-	if status_prefix == null:
-		status_prefix = get_node_or_null("Margin/VBox/StatusRow/StatusPrefix")
-	if status_value == null:
-		status_value = get_node_or_null("Margin/VBox/StatusRow/StatusValue")
-	if status_prefix == null or status_value == null:
-		return
-
+	# Prefix always white; value color-coded.
 	status_prefix.text = "Status:"
 	status_prefix.add_theme_color_override("font_color", Color(1, 1, 1, 1))
 
@@ -413,7 +590,7 @@ func _refresh_status(msg: String, tone: StatusTone = StatusTone.IDLE) -> void:
 		StatusTone.ERROR:
 			c = Color(1.00, 0.30, 0.30) # red
 		_:
-			c = Color(0.85, 0.85, 0.85) # light gray idle
+			c = Color(0.90, 0.90, 0.90) # idle
 
 	status_value.add_theme_color_override("font_color", c)
 
@@ -422,13 +599,8 @@ func _set_error(msg: String) -> void:
 	_log("[color=tomato][b]Error:[/b][/color] %s" % msg)
 
 func _log(bb: String) -> void:
-	if output_box == null:
-		output_box = get_node_or_null("Margin/VBox/Output")
-	if output_box != null:
-		output_box.append_text(bb + "\n")
-		output_box.scroll_to_line(output_box.get_line_count())
-	else:
-		print("[UploadPanel] ", bb.replace("[color=", "").replace("[/color]", ""))
+	output_box.append_text(bb + "\n")
+	output_box.scroll_to_line(output_box.get_line_count())
 
 # -------------------------------------------------------------------
 # Styling: light “Microsoft-esque” theme + drop flash
@@ -442,6 +614,7 @@ func _apply_light_theme() -> void:
 	var border: Color = Color(0.82, 0.82, 0.82)
 	var text: Color = Color(0.13, 0.13, 0.13)
 	var subtext: Color = Color(0.35, 0.35, 0.35)
+
 	var accent: Color = Color(0.00, 0.47, 0.83)
 	var accent_hover: Color = Color(0.00, 0.40, 0.72)
 
@@ -471,10 +644,12 @@ func _apply_light_theme() -> void:
 	_sb_drop_flash.bg_color = Color(0.93, 0.97, 1.0)
 	_sb_drop_flash.border_color = Color(0.35, 0.62, 0.90)
 
+	# Root background
 	var sb_root: StyleBoxFlat = StyleBoxFlat.new()
 	sb_root.bg_color = bg
 	add_theme_stylebox_override("panel", sb_root)
 
+	# Text defaults
 	_t.set_color("font_color", "Label", text)
 	_t.set_color("font_color", "RichTextLabel", text)
 	_t.set_color("font_color", "LineEdit", text)
@@ -482,6 +657,7 @@ func _apply_light_theme() -> void:
 
 	drop_hint.add_theme_color_override("font_color", subtext)
 
+	# Buttons
 	var sb_btn: StyleBoxFlat = StyleBoxFlat.new()
 	sb_btn.bg_color = accent
 	sb_btn.border_color = accent
@@ -508,6 +684,7 @@ func _apply_light_theme() -> void:
 	_t.set_stylebox("focus", "Button", sb_btn_hover)
 	_t.set_color("font_color", "Button", Color(1, 1, 1))
 
+	# LineEdit
 	var sb_edit: StyleBoxFlat = _sb_panel.duplicate() as StyleBoxFlat
 	sb_edit.bg_color = Color(1, 1, 1)
 	sb_edit.corner_radius_top_left = 8
@@ -523,16 +700,9 @@ func _apply_light_theme() -> void:
 	_t.set_stylebox("panel", "ItemList", sb_list)
 	_t.set_stylebox("normal", "RichTextLabel", sb_list)
 
-	# ------------------------------------------------------------
 	# ItemList hover + selection colors
-	# Theme keys for ItemList include:
-	#   StyleBoxes: hovered, selected, selected_focus, hovered_selected, hovered_selected_focus
-	#   Colors: font_color, font_hovered_color, font_selected_color, font_hovered_selected_color
-	# ------------------------------------------------------------
-
-	# Hovered (darkish grey)
 	var sb_item_hover: StyleBoxFlat = StyleBoxFlat.new()
-	sb_item_hover.bg_color = Color(0.25, 0.25, 0.25, 0.55)   # dark grey hover
+	sb_item_hover.bg_color = Color(0.25, 0.25, 0.25, 0.55)
 	sb_item_hover.corner_radius_top_left = 6
 	sb_item_hover.corner_radius_top_right = 6
 	sb_item_hover.corner_radius_bottom_left = 6
@@ -542,32 +712,43 @@ func _apply_light_theme() -> void:
 	sb_item_hover.content_margin_top = 2
 	sb_item_hover.content_margin_bottom = 2
 
-	# Selected (green)
 	var sb_item_selected: StyleBoxFlat = sb_item_hover.duplicate() as StyleBoxFlat
-	sb_item_selected.bg_color = Color(0.20, 0.75, 0.35, 0.90)  # green selection
+	sb_item_selected.bg_color = Color(0.20, 0.75, 0.35, 0.90)
 
-	# Hovered + selected (slightly darker green)
 	var sb_item_hover_selected: StyleBoxFlat = sb_item_selected.duplicate() as StyleBoxFlat
 	sb_item_hover_selected.bg_color = Color(0.16, 0.68, 0.31, 0.95)
 
-	# Apply the styleboxes to ItemList’s theme slots
 	_t.set_stylebox("hovered", "ItemList", sb_item_hover)
 	_t.set_stylebox("selected", "ItemList", sb_item_selected)
 	_t.set_stylebox("selected_focus", "ItemList", sb_item_selected)
 	_t.set_stylebox("hovered_selected", "ItemList", sb_item_hover_selected)
 	_t.set_stylebox("hovered_selected_focus", "ItemList", sb_item_hover_selected)
 
-	# Text colors for the different ItemList states
-	_t.set_color("font_color", "ItemList", Color(0.13, 0.13, 0.13))                 # default
-	_t.set_color("font_hovered_color", "ItemList", Color(1, 1, 1))                  # hover text
-	_t.set_color("font_selected_color", "ItemList", Color(1, 1, 1))                 # selected text
-	_t.set_color("font_hovered_selected_color", "ItemList", Color(1, 1, 1))         # hover+selected text
+	_t.set_color("font_color", "ItemList", Color(0.13, 0.13, 0.13))
+	_t.set_color("font_hovered_color", "ItemList", Color(1, 1, 1))
+	_t.set_color("font_selected_color", "ItemList", Color(1, 1, 1))
+	_t.set_color("font_hovered_selected_color", "ItemList", Color(1, 1, 1))
 
-
+	# PanelContainer default
 	_t.set_stylebox("panel", "PanelContainer", _sb_panel)
 
 	theme = _t
+
+	# Drop zone can flash independently
 	drop_zone.add_theme_stylebox_override("panel", _sb_drop_idle)
+
+	# Status bar: dark background so white prefix is readable
+	_sb_status_bar = StyleBoxFlat.new()
+	_sb_status_bar.bg_color = Color(0.10, 0.10, 0.10, 0.90)
+	_sb_status_bar.corner_radius_top_left = 8
+	_sb_status_bar.corner_radius_top_right = 8
+	_sb_status_bar.corner_radius_bottom_left = 8
+	_sb_status_bar.corner_radius_bottom_right = 8
+	_sb_status_bar.content_margin_left = 10
+	_sb_status_bar.content_margin_right = 10
+	_sb_status_bar.content_margin_top = 6
+	_sb_status_bar.content_margin_bottom = 6
+	status_bar.add_theme_stylebox_override("panel", _sb_status_bar)
 
 func _flash_drop_zone() -> void:
 	drop_zone.add_theme_stylebox_override("panel", _sb_drop_flash)
