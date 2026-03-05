@@ -25,11 +25,13 @@ theme_override_constants/separation = 12
 [node name="Header" type="Label" parent="Margin/VBox"]
 text = "Circuit Upload"
 theme_override_font_sizes/font_size = 40
+theme_override_colors/font_color = Color(0.82, 0.82, 0.82, 1)
 
 [node name="Subheader" type="Label" parent="Margin/VBox"]
 text = "Add circuit files here. Godot keeps copies in a safe uploads folder, then on Windows/macOS/Linux we can run ngspice to generate simulation data for the visualizer."
 autowrap_mode = 3
 theme_override_font_sizes/font_size = 13
+theme_override_colors/font_color = Color(0.72, 0.72, 0.72, 1)
 
 [node name="ControlsRow" type="HBoxContainer" parent="Margin/VBox"]
 size_flags_horizontal = 3
@@ -107,6 +109,8 @@ size_flags_vertical = 3
 fit_content = false
 scroll_active = true
 selection_enabled = true
+bbcode_enabled = true
+default_color = Color(0.10, 0.10, 0.10, 1)
 
 [node name="FileDialog" type="FileDialog" parent="."]
 access = 2
