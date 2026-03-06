@@ -29,3 +29,11 @@ jobs:
 
       - name: Show export presets
         run: cat project/export_presets.cfg
+        
+      - name: Export Web build
+        run: |
+          mkdir -p build/web
+          godot --headless --export-release "Web" build/web/index.html
+        
+      - name: Show build output
+        run: ls build/web
