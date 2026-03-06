@@ -21,5 +21,11 @@ jobs:
       - name: Check Godot version
         run: godot --version
         
-      - name: Test project loads
+      - name: Test godot engine
         run: godot --headless --editor --quit
+    
+      - name: List repository files
+        run: ls
+
+      - name: Show export presets
+        run: cat export_presets.cfg
