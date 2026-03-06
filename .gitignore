@@ -31,9 +31,6 @@ ngspice/
 project/schematics/
 project/symbols/
 
-# Export
-export_presets.cfg
-
 # OS
 .DS_Store
 Thumbs.db
