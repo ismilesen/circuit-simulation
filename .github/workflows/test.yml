@@ -25,7 +25,7 @@ jobs:
         run: godot --headless --editor --quit
     
       - name: List repository files
-        run: ls
+        run: ls project
 
       - name: Show export presets
-        run: cat export_presets.cfg
+        run: cat project/export_presets.cfg
