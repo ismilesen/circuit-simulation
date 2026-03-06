@@ -15,8 +15,11 @@ jobs:
       - name: Install Godot
         uses: chickensoft-games/setup-godot@v2
         with:
-          version: 4.6.0
+          version: 4.6.0 # https://www.nuget.org/packages/GodotSharp#versions-body-tab
           use-dotnet: false
 
       - name: Check Godot version
         run: godot --version
+        
+      - name: Test project loads
+        run: godot --headless --editor --quit
