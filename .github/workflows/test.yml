@@ -1,0 +1,22 @@
+name: Test Godot Install
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  test-godot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Godot
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.6
+          use-dotnet: false
+
+      - name: Check Godot version
+        run: godot --version
