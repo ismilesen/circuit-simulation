@@ -26,6 +26,14 @@ jobs:
       - name: Setup Emscripten
         uses: mymindstorm/setup-emsdk@v14
 
+      - name: Install ngspice
+        run: sudo apt-get update && sudo apt-get install -y libngspice-dev
+
+      - name: Copy headers locally
+        run: |
+          mkdir -p ngspice
+          cp /usr/include/ngspice/*.h ngspice/
+
       - name: Build GDExtension for Web
         run: |
           mkdir -p project/bin
