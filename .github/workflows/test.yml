@@ -26,6 +26,12 @@ jobs:
       - name: Setup Emscripten
         uses: mymindstorm/setup-emsdk@v14
 
+      - name: Install Web export templates
+        run: |
+          mkdir -p ~/.local/share/godot/export_templates/4.6.stable
+          cp templates/web_dlink_debug.zip ~/.local/share/godot/export_templates/4.6.stable/
+          cp templates/web_dlink_release.zip ~/.local/share/godot/export_templates/4.6.stable/
+
       - name: Download ngspice header
         run: |
           mkdir -p ngspice
@@ -39,12 +45,6 @@ jobs:
 
       - name: Check build
         run: ls project/bin
-          
-      - name: Test godot engine
-        run: godot --headless --editor --quit
-
-      - name: Show export presets
-        run: cat project/export_presets.cfg
         
       - name: Export Web build
         run: |
