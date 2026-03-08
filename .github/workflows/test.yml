@@ -27,7 +27,7 @@ jobs:
         uses: mymindstorm/setup-emsdk@v14
 
       - name: Install ngspice
-        run: sudo apt-get update && sudo apt-get install -y libngspice-dev
+        run: sudo apt-get update && sudo apt-get install -y ngspice-dev
 
       - name: Copy headers locally
         run: |
