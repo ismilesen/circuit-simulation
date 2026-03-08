@@ -11,6 +11,10 @@ env.Append(CPPPATH=["src/"])
 env.Append(CPPPATH=["ngspice"])
 env.Append(LIBPATH=["ngspice/"])
 
+# For github actions
+env.Append(CPPPATH=["/usr/include/ngspice"])
+env.Append(LIBPATH=["/usr/lib"])
+
 # Source files
 sources = Glob("src/*.cpp")
 
