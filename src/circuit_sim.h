@@ -22,7 +22,7 @@
 #include <dlfcn.h>
 #endif
 
-#include "sharedspice.h"
+#include "ngspice_types.h"
 
 namespace godot {
 
@@ -48,6 +48,9 @@ private:
     int (*ng_Command)(char*);
     int (*ng_Circ)(char**);
     bool (*ng_Running)();
+    pvector_info (*ng_GetVecInfo)(char*);
+    char* (*ng_CurPlot)();
+    char** (*ng_AllVecs)(char*);
 
     // Load ngspice dynamically
     bool load_ngspice_library();
@@ -97,8 +100,10 @@ public:
 
     // Circuit loading
     Dictionary load_netlist(const String &netlist_path, const String &pdk_root = "");
+    bool load_netlist_string(const String &netlist_content);
 
     // Simulation control
+    bool run_simulation();
     bool start_continuous_transient(double step, double window, int64_t sleep_ms = 25);
     void stop_continuous_transient();
     bool is_continuous_transient_running() const;
@@ -113,6 +118,9 @@ public:
     Array get_continuous_memory_snapshot() const;
     Array pop_continuous_memory_samples(int64_t count = 256);
     int64_t get_continuous_memory_sample_count() const;
+    Dictionary get_all_vectors();
+    Array get_last_sim_snapshot() const;
+    PackedStringArray get_last_sim_signal_names() const;
 
     // Static instance for callbacks
     static CircuitSimulator* instance;

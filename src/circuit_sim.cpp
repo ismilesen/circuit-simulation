@@ -1,6 +1,7 @@
 #include "circuit_sim.h"
 
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
@@ -335,6 +336,11 @@ void CircuitSimulator::_bind_methods() {
     // Minimal runtime API used by the current Godot UI.
     ClassDB::bind_method(D_METHOD("initialize_ngspice"), &CircuitSimulator::initialize_ngspice);
     ClassDB::bind_method(D_METHOD("load_netlist", "netlist_path", "pdk_root"), &CircuitSimulator::load_netlist, DEFVAL(""));
+    ClassDB::bind_method(D_METHOD("load_netlist_string", "netlist_content"), &CircuitSimulator::load_netlist_string);
+    ClassDB::bind_method(D_METHOD("run_simulation"), &CircuitSimulator::run_simulation);
+    ClassDB::bind_method(D_METHOD("get_all_vectors"), &CircuitSimulator::get_all_vectors);
+    ClassDB::bind_method(D_METHOD("get_last_sim_snapshot"), &CircuitSimulator::get_last_sim_snapshot);
+    ClassDB::bind_method(D_METHOD("get_last_sim_signal_names"), &CircuitSimulator::get_last_sim_signal_names);
 
     ClassDB::bind_method(
         D_METHOD("start_continuous_transient", "step", "window", "sleep_ms"),
@@ -382,6 +388,9 @@ CircuitSimulator::CircuitSimulator() {
     ng_Command = nullptr;
     ng_Circ = nullptr;
     ng_Running = nullptr;
+    ng_GetVecInfo = nullptr;
+    ng_CurPlot = nullptr;
+    ng_AllVecs = nullptr;
     continuous_stop_requested = false;
     continuous_running = false;
     continuous_step = 0.0;
@@ -435,6 +444,12 @@ bool CircuitSimulator::load_ngspice_library() {
         GetProcAddress(ngspice_handle, "ngSpice_Circ");
     ng_Running = (bool (*)())
         GetProcAddress(ngspice_handle, "ngSpice_running");
+    ng_GetVecInfo = (pvector_info (*)(char*))
+        GetProcAddress(ngspice_handle, "ngGet_Vec_Info");
+    ng_CurPlot = (char* (*)())
+        GetProcAddress(ngspice_handle, "ngSpice_CurPlot");
+    ng_AllVecs = (char** (*)(char*))
+        GetProcAddress(ngspice_handle, "ngSpice_AllVecs");
 #else
     std::vector<std::string> candidates;
 #ifdef __APPLE__
@@ -454,6 +469,28 @@ bool CircuitSimulator::load_ngspice_library() {
         "/usr/local/lib/libngspice.so"
     };
 #else
+#ifdef __EMSCRIPTEN__
+    candidates = {
+        "libngspice.so",
+        "./libngspice.so",
+        "ngspice/libngspice.so",
+        "./ngspice/libngspice.so",
+        "/libngspice.so",
+        "/ngspice/libngspice.so"
+    };
+
+    ProjectSettings *ps = ProjectSettings::get_singleton();
+    if (ps != nullptr) {
+        const String res_ngspice = ps->globalize_path("res://ngspice/libngspice.so");
+        if (!res_ngspice.is_empty()) {
+            candidates.push_back(std::string(res_ngspice.utf8().get_data()));
+        }
+        const String res_nested_ngspice = ps->globalize_path("res://ngspice/ngspice/libngspice.so");
+        if (!res_nested_ngspice.is_empty()) {
+            candidates.push_back(std::string(res_nested_ngspice.utf8().get_data()));
+        }
+    }
+#else
     candidates = {
         "libngspice.so",
         "./libngspice.so",
@@ -462,6 +499,7 @@ bool CircuitSimulator::load_ngspice_library() {
         "/usr/lib/libngspice.so",
         "/usr/local/lib/libngspice.so"
     };
+#endif
 #endif
 
     String attempted_paths;
@@ -502,6 +540,12 @@ bool CircuitSimulator::load_ngspice_library() {
         dlsym(ngspice_handle, "ngSpice_Circ");
     ng_Running = (bool (*)())
         dlsym(ngspice_handle, "ngSpice_running");
+    ng_GetVecInfo = (pvector_info (*)(char*))
+        dlsym(ngspice_handle, "ngGet_Vec_Info");
+    ng_CurPlot = (char* (*)())
+        dlsym(ngspice_handle, "ngSpice_CurPlot");
+    ng_AllVecs = (char** (*)(char*))
+        dlsym(ngspice_handle, "ngSpice_AllVecs");
 #endif
 
     if (!ng_Init || !ng_Command) {
@@ -534,6 +578,12 @@ bool CircuitSimulator::initialize_ngspice() {
         UtilityFunctions::print("ngspice already initialized");
         return true;
     }
+
+#ifdef __EMSCRIPTEN__
+    if (std::getenv("SPICE_SCRIPTS") == nullptr) {
+        setenv("SPICE_SCRIPTS", "/ngspice/share/ngspice/scripts", 0);
+    }
+#endif
 
     if (!load_ngspice_library()) {
         return false;
@@ -680,7 +730,48 @@ Dictionary CircuitSimulator::load_netlist(const String &netlist_path, const Stri
     return result;
 }
 
-// Starts a looping transient stream that emits frame snapshots.
+bool CircuitSimulator::load_netlist_string(const String &netlist_content) {
+    if (!initialized) {
+        UtilityFunctions::printerr("ngspice not initialized");
+        return false;
+    }
+    if (!ng_Circ) {
+        UtilityFunctions::printerr("ngSpice_Circ not available");
+        return false;
+    }
+
+    PackedStringArray lines = netlist_content.split("\n");
+    std::vector<char *> circ_lines;
+    std::vector<std::string> line_storage;
+    circ_lines.reserve(lines.size() + 1);
+    line_storage.reserve(lines.size());
+
+    for (int i = 0; i < lines.size(); i++) {
+        line_storage.push_back(std::string(lines[i].utf8().get_data()));
+        circ_lines.push_back(const_cast<char *>(line_storage.back().c_str()));
+    }
+    circ_lines.push_back(nullptr);
+
+    const int ret = ng_Circ(circ_lines.data());
+    if (ret != 0) {
+        UtilityFunctions::printerr("Failed to load netlist from string");
+        return false;
+    }
+
+    current_netlist = netlist_content;
+    return true;
+}
+
+bool CircuitSimulator::run_simulation() {
+    if (!initialized || !ng_Command) {
+        UtilityFunctions::printerr("ngspice not initialized");
+        return false;
+    }
+    const int ret = ng_Command((char *)"bg_run");
+    return ret == 0;
+}
+
+// Starts a transient stream that emits frame snapshots.
 bool CircuitSimulator::start_continuous_transient(double step, double window, int64_t sleep_ms) {
     if (!initialized || !ng_Command) {
         UtilityFunctions::printerr("ngspice not initialized");
@@ -956,4 +1047,41 @@ Array CircuitSimulator::pop_continuous_memory_samples(int64_t count) {
 int64_t CircuitSimulator::get_continuous_memory_sample_count() const {
     std::lock_guard<std::mutex> lock(memory_mutex);
     return static_cast<int64_t>(memory_samples.size());
+}
+
+Dictionary CircuitSimulator::get_all_vectors() {
+    Dictionary result;
+    if (!initialized || !ng_CurPlot || !ng_AllVecs || !ng_GetVecInfo) {
+        return result;
+    }
+
+    char *cur_plot = ng_CurPlot();
+    if (!cur_plot) {
+        return result;
+    }
+
+    char **all_vecs = ng_AllVecs(cur_plot);
+    if (!all_vecs) {
+        return result;
+    }
+
+    for (int i = 0; all_vecs[i] != nullptr; i++) {
+        pvector_info vec = ng_GetVecInfo(all_vecs[i]);
+        if (vec && vec->v_realdata) {
+            Array data;
+            for (int j = 0; j < vec->v_length; j++) {
+                data.append(vec->v_realdata[j]);
+            }
+            result[String(all_vecs[i])] = data;
+        }
+    }
+    return result;
+}
+
+Array CircuitSimulator::get_last_sim_snapshot() const {
+    return get_continuous_memory_snapshot();
+}
+
+PackedStringArray CircuitSimulator::get_last_sim_signal_names() const {
+    return get_continuous_memory_signal_names();
 }
