@@ -11,7 +11,7 @@ RUN apt-get update \
        build-essential git curl ca-certificates python3-venv python3-pip \
        autoconf automake libtool pkg-config cmake bison flex \
        libncurses5-dev libreadline-dev libx11-dev libxaw7-dev \
-       wget unzip xz-utils \
+       wget unzip xz-utils zip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install pyodide-build from pyodide-recipes.
