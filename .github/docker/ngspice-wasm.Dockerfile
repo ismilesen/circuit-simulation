@@ -32,3 +32,6 @@ RUN cd "${PYODIDE_RECIPES_DIR}" \
     && source "${EMSDK_DIR}/emsdk_env.sh" \
     && mkdir -p "${PYODIDE_INSTALL_DIR}" \
     && pyodide build-recipes libngspice --install --install-dir="${PYODIDE_INSTALL_DIR}"
+
+RUN cd "${PYODIDE_INSTALL_DIR}" \
+    && zip -r libngspice-44.2.zip .
