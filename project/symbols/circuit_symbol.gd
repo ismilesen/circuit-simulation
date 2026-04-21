@@ -67,9 +67,14 @@ func setup(comp: Dictionary, definition: SymbolDefinition, scale: float, mat: St
 			add_child(dot)
 			pin_meshes[box.pin_name] = dot
 
-	# Texts -> Label3D nodes with template variable substitution
-	for txt in definition.texts:
-		_add_sym_text(txt, comp, scale, mat)
+	# Texts -> Label3D nodes with template variable substitution.
+	# Transistors (nmos/pmos) suppress all sym texts — the external billboard in
+	# VisSceneBuilder.draw_component shows the instance name instead.
+	var sym_type: String = definition.type
+	var is_transistor_sym: bool = (sym_type == "nmos" or sym_type == "pmos")
+	if not is_transistor_sym:
+		for txt in definition.texts:
+			_add_sym_text(txt, comp, scale, mat, sym_type)
 
 	# If the symbol has no visual geometry at all, add a small dot marker
 	var has_geometry = definition.lines.size() > 0 \
@@ -233,13 +238,22 @@ func _add_filled_polygon(points: Array[Vector2], scale: float, mat: StandardMate
 	add_child(mi2)
 
 
-func _add_sym_text(txt: SymbolDefinition.Text, comp: Dictionary, scale: float, mat: StandardMaterial3D) -> void:
-	# Layer 1 = hidden; layers 13/15/17 = xschem sim probe overlays — skip all.
-	if txt.layer == 1 or txt.layer == 13 or txt.layer == 15 or txt.layer == 17:
+func _add_sym_text(txt: SymbolDefinition.Text, comp: Dictionary, scale: float, mat: StandardMaterial3D, sym_type: String = "") -> void:
+	# Layer 1 = hidden; layer 7 = FET pin-letter labels (S/D/G/B); layers 13/15/17 = sim probes — skip.
+	if txt.layer == 1 or txt.layer == 7 or txt.layer == 13 or txt.layer == 15 or txt.layer == 17:
+		return
+	# Primitives: @name and @symname are shown by the external billboard in VisSceneBuilder;
+	# keep pin-role labels (CLK, D, Q, A, B, …) which add useful context inside the cell box.
+	if sym_type == "primitive" and ("@name" in txt.text or "@symname" in txt.text):
 		return
 
 	var sym_base: String = str(comp.get("symbol", "")).get_file().get_basename()
-	var attrs: Dictionary = comp.get("attributes", {}) as Dictionary
+	var attrs: Dictionary = (comp.get("attributes", {}) as Dictionary).duplicate()
+	# Ensure @lab resolves — the C++ parser may store it as comp["label"] not in attributes.
+	if not attrs.has("lab"):
+		var lv: String = comp.get("label", "")
+		if lv != "":
+			attrs["lab"] = lv
 
 	# Resolve @symname and @name template variables.
 	var resolved: String = txt.text
@@ -277,6 +291,8 @@ func _add_sym_text(txt: SymbolDefinition.Text, comp: Dictionary, scale: float, m
 	lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	lbl.modulate = mat.albedo_color
 	lbl.outline_size = 4
+	lbl.no_depth_test = true
+	lbl.extra_cull_margin = 5.0
 	lbl.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 	lbl.position = Vector3(txt.x * scale, 0.01, txt.y * scale)
 	# mirror=1 means right-aligned in xschem (text hangs left from the anchor).
