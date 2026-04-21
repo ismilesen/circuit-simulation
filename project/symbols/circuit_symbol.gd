@@ -17,6 +17,10 @@ var sym_def: SymbolDefinition
 ## Pin positions in local space, keyed by pin name (e.g. "D", "G", "S").
 var pin_positions: Dictionary = {}
 
+## Animatable sphere mesh at each pin tip, keyed by pin name.
+## Registered into _net_nodes by VisSceneBuilder.build_pin_net_lookup() after placement.
+var pin_meshes: Dictionary = {}
+
 ## Thickness of line-segment bars.
 const BAR: float = 0.012
 
@@ -40,11 +44,32 @@ func setup(comp: Dictionary, definition: SymbolDefinition, scale: float, mat: St
 	for poly in definition.polygons:
 		_add_polygon_mesh(poly, scale, mat)
 
-	# Boxes/Pins -> compute local positions
+	# Boxes/Pins -> compute local positions + create a sphere at each pin tip
 	for box in definition.boxes:
 		if box.pin_name != "":
 			var c = box.center()
-			pin_positions[box.pin_name] = Vector3(c.x * scale, 0, c.y * scale)
+			var local_pos := Vector3(c.x * scale, 0, c.y * scale)
+			pin_positions[box.pin_name] = local_pos
+
+			var dot_mat := StandardMaterial3D.new()
+			dot_mat.albedo_color = Color(0.9, 0.9, 0.9)
+			dot_mat.emission_enabled = true
+			dot_mat.emission = Color.BLACK
+			dot_mat.emission_energy_multiplier = 0.0
+
+			var dot := MeshInstance3D.new()
+			var sphere := SphereMesh.new()
+			sphere.radius = 0.014
+			sphere.height  = 0.028
+			dot.mesh = sphere
+			dot.material_override = dot_mat
+			dot.position = local_pos
+			add_child(dot)
+			pin_meshes[box.pin_name] = dot
+
+	# Texts -> Label3D nodes with template variable substitution
+	for txt in definition.texts:
+		_add_sym_text(txt, comp, scale, mat)
 
 	# If the symbol has no visual geometry at all, add a small dot marker
 	var has_geometry = definition.lines.size() > 0 \
@@ -206,3 +231,55 @@ func _add_filled_polygon(points: Array[Vector2], scale: float, mat: StandardMate
 	mi2.mesh = arr_mesh2
 	mi2.material_override = mat
 	add_child(mi2)
+
+
+func _add_sym_text(txt: SymbolDefinition.Text, comp: Dictionary, scale: float, mat: StandardMaterial3D) -> void:
+	# Layer 1 = hidden; layers 13/15/17 = xschem sim probe overlays — skip all.
+	if txt.layer == 1 or txt.layer == 13 or txt.layer == 15 or txt.layer == 17:
+		return
+
+	var sym_base: String = str(comp.get("symbol", "")).get_file().get_basename()
+	var attrs: Dictionary = comp.get("attributes", {}) as Dictionary
+
+	# Resolve @symname and @name template variables.
+	var resolved: String = txt.text
+	resolved = resolved.replace("@symname", sym_base)
+	resolved = resolved.replace("@name", str(comp.get("name", "")))
+	# @@PORT → value of that port attribute (net name), fallback to port name itself.
+	while "@@" in resolved:
+		var at := resolved.find("@@")
+		var end := at + 2
+		while end < resolved.length() and (resolved[end].is_valid_identifier() or resolved[end] == "_"):
+			end += 1
+		var key: String = resolved.substr(at + 2, end - at - 2)
+		var val: String = str(attrs.get(key, key))
+		resolved = resolved.substr(0, at) + val + resolved.substr(end)
+	# Single @ prefix (e.g. @VPWR) — same lookup without the fallback display.
+	while "@" in resolved:
+		var at := resolved.find("@")
+		var end := at + 1
+		while end < resolved.length() and (resolved[end].is_valid_identifier() or resolved[end] == "_"):
+			end += 1
+		var key: String = resolved.substr(at + 1, end - at - 1)
+		if key.is_empty():
+			break
+		resolved = resolved.substr(0, at) + str(attrs.get(key, "")) + resolved.substr(end)
+
+	resolved = resolved.strip_edges()
+	if resolved.is_empty():
+		return
+
+	var lbl := Label3D.new()
+	lbl.text = resolved
+	# size_x in xschem is a scale factor; map 0.2 → font_size 28, 0.3 → 42, etc.
+	lbl.font_size = int(txt.size_x * 280.0)
+	lbl.pixel_size = 0.0005
+	lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	lbl.modulate = mat.albedo_color
+	lbl.outline_size = 4
+	lbl.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	lbl.position = Vector3(txt.x * scale, 0.01, txt.y * scale)
+	# mirror=1 means right-aligned in xschem (text hangs left from the anchor).
+	if txt.mirror == 1:
+		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	add_child(lbl)

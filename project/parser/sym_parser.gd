@@ -54,7 +54,7 @@ static func parse(path: String) -> SymbolDefinition:
 	return symbol
 
 
-######################################################################################################
+
 # Block skipping — advances past balanced braces.
 static func _skip_brace_block(lines: PackedStringArray, start: int) -> int:
 	var depth := 0

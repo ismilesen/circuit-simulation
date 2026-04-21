@@ -4,7 +4,20 @@ extends RefCounted
 ## Geometry constants (xschem symbol units → 3D path fractions).
 const CHANNEL_FRAC: float = 0.3125   # 12.5 / 40
 const STUB_FRAC:    float = 7.0 / 12.0  # 17.5 / 30
-const VTH:          float = 0.5      # MOS threshold voltage (sky130 approx.)
+
+## Sky130 threshold voltages (typical corner) used for conductance visualisation.
+## These match the tt-corner model parameters so the transistor glow and cursor
+## trigger thresholds are consistent with the ngspice simulation.
+const NFET_VTH:     float = 0.48   # sky130_fd_pr__nfet_01v8 tt
+const PFET_VTH:     float = 0.58   # sky130_fd_pr__pfet_01v8 tt
+const PFET_HVT_VTH: float = 0.74   # sky130_fd_pr__pfet_01v8_hvt tt
+
+## Returns the correct threshold voltage for a transistor given its model string.
+static func vth_for_model(model: String) -> float:
+	var m: String = model.to_lower()
+	if "pfet" in m or "pmos" in m:
+		return PFET_HVT_VTH if "hvt" in m else PFET_VTH
+	return NFET_VTH
 
 
 ## 6-waypoint path through the transistor symbol body:
@@ -144,11 +157,12 @@ static func parse_spice_transistors(path: String) -> Dictionary:
 		var comp_name: String = str(parts[0]).substr(1)   # "XM7" → "M7"
 		var is_pmos: bool = "pfet" in model or "pmos" in model
 		result[comp_name] = {
-			"d":    str(parts[1]).to_lower(),
-			"g":    str(parts[2]).to_lower(),
-			"s":    str(parts[3]).to_lower(),
-			"b":    str(parts[4]).to_lower(),
-			"type": "pfet" if is_pmos else "nfet",
+			"d":     str(parts[1]).to_lower(),
+			"g":     str(parts[2]).to_lower(),
+			"s":     str(parts[3]).to_lower(),
+			"b":     str(parts[4]).to_lower(),
+			"type":  "pfet" if is_pmos else "nfet",
+			"model": model,
 		}
 
 	return result

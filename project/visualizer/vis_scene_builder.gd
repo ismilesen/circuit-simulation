@@ -28,8 +28,6 @@ func draw_circuit(parser, floor: MeshInstance3D) -> void:
 	_vis._gate_cursor_map.clear()
 	_vis._input_positions.clear()
 	_vis._net_cascade.clear()
-	_vis._net_was_done.clear()
-	_vis._seed_nets.clear()
 
 	var split_wires: Array = VisGeomUtils.split_wires_at_junctions(Array(parser.wires))
 	_propagate_labels(split_wires, Array(parser.components))
@@ -40,7 +38,13 @@ func draw_circuit(parser, floor: MeshInstance3D) -> void:
 		draw_component(comp, parser)
 
 	build_net_lookup()
+	build_pin_net_lookup()
 	build_wire_graph()
+
+	# If SPICE was already paired before this schematic loaded, rebuild cursors now
+	# so they reference the freshly created CircuitSymbol nodes.
+	if not _vis._transistor_data.is_empty():
+		_vis._cursor_builder.build_transistor_cursors()
 
 
 # ---------- Wires ----------
@@ -97,16 +101,10 @@ func draw_wire(wire: Dictionary) -> void:
 		label.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 		_vis.add_child(label)
 
-		# Flow cursor sphere for this labeled wire segment.
+		# Cursor node kept for wire-picking metadata but never made visible.
 		var cursor := MeshInstance3D.new()
-		var sphere := SphereMesh.new()
-		sphere.radius = 0.022
-		sphere.height = 0.044
-		cursor.mesh = sphere
 		var cursor_mat := StandardMaterial3D.new()
 		cursor_mat.emission_enabled = true
-		cursor_mat.emission = Color.WHITE
-		cursor_mat.emission_energy_multiplier = 3.0
 		cursor.material_override = cursor_mat
 		cursor.visible = false
 		cursor.position = p1
@@ -152,7 +150,10 @@ func draw_component(comp: Dictionary, parser) -> void:
 	var mat: StandardMaterial3D = VisMaterialFactory.get_material(_vis._materials, mat_type)
 
 	var comp_name: String = comp.get("name", "")
-	if (type == "pmos" or type == "nmos") and comp_name != "":
+	# Use both C++ type and sym K-block mat_type — C++ may return "unknown" for some
+	# transistor sym files even though mat_type correctly reads "nmos"/"pmos" from K block.
+	var is_transistor: bool = (type == "pmos" or type == "nmos" or mat_type == "pmos" or mat_type == "nmos")
+	if is_transistor and comp_name != "":
 		mat = mat.duplicate() as StandardMaterial3D
 		_vis._transistor_materials[comp_name] = mat
 
@@ -164,14 +165,30 @@ func draw_component(comp: Dictionary, parser) -> void:
 		symbol.scale.x = -1.0
 	_vis.add_child(symbol)
 
-	if comp_name != "" and (type == "pmos" or type == "nmos"):
+	if comp_name != "" and is_transistor:
 		_vis._transistor_nodes[comp_name] = symbol
 
 	if type == "ipin" or type == "input_pin":
 		_vis._input_positions.append(pos)
 
+	# "primitive" sym files carry their own T-line texts (symname, name, pin labels)
+	# rendered by CircuitSymbol._add_sym_text — skip the external billboard label to
+	# avoid duplication.
+	if mat_type == "primitive":
+		return
+
 	var comp_label: String = comp.get("label", "")
-	var label_text: String = comp_label if comp_label != "" else mat_type
+	var inst_name: String  = comp.get("name", "")
+	var sym_base: String   = str(comp.get("symbol", "")).get_file().get_basename()
+	var label_text: String
+	if comp_label != "":
+		label_text = comp_label
+	elif sym_base != "" and inst_name != "":
+		label_text = sym_base + "\n" + inst_name
+	elif sym_base != "":
+		label_text = sym_base
+	else:
+		label_text = mat_type
 	var label := Label3D.new()
 	label.text = label_text
 	label.position = pos + Vector3(0, VisMaterialFactory.get_label_height(mat_type), 0)
@@ -356,6 +373,54 @@ func build_net_lookup() -> void:
 		# Labeled wires already carry a ShaderMaterial; don't overwrite.
 		if not (child.material_override is ShaderMaterial):
 			(child as MeshInstance3D).material_override = _vis._net_materials[net]
+
+
+## Matches each primitive-symbol pin sphere to its connected wire net, then
+## registers it in _net_nodes so _update_wire_colors animates it automatically.
+func build_pin_net_lookup() -> void:
+	var sf: float = _vis.scale_factor
+
+	# Build world-position → net map from labeled wire cursor endpoints.
+	var endpoint_nets: Dictionary = {}
+	for wd: Dictionary in _vis._wire_cursors:
+		var net: String = str(wd["net"])
+		endpoint_nets[_vec3_key(wd["p1"])] = net
+		endpoint_nets[_vec3_key(wd["p2"])] = net
+
+	# Walk every CircuitSymbol child and register its pin dots.
+	# Skip transistors — they use _transistor_materials, not _net_materials.
+	for child in _vis.get_children():
+		if not (child is CircuitSymbol):
+			continue
+		var sym: CircuitSymbol = child as CircuitSymbol
+		var sym_type: String = sym.sym_def.type if sym.sym_def != null else ""
+		if sym_type == "nmos" or sym_type == "pmos":
+			continue
+		for pin_name: String in sym.pin_meshes.keys():
+			var world_pos: Vector3 = sym.get_pin_position(pin_name)
+			var key: String = _vec3_key(world_pos)
+			if not endpoint_nets.has(key):
+				continue
+			var net: String = str(endpoint_nets[key])
+			var dot: MeshInstance3D = sym.pin_meshes[pin_name] as MeshInstance3D
+
+			# Create net material if this net had no labeled wire segment (rare).
+			if not _vis._net_materials.has(net):
+				var mat := StandardMaterial3D.new()
+				mat.albedo_color = Color(0.9, 0.9, 0.9)
+				mat.emission_enabled = true
+				mat.emission = Color.BLACK
+				mat.emission_energy_multiplier = 0.0
+				_vis._net_materials[net] = mat
+				_vis._net_nodes[net] = []
+
+			# Share the net's StandardMaterial so the anim player colors it for free.
+			dot.material_override = _vis._net_materials[net]
+			_vis._net_nodes[net].append(dot)
+
+
+static func _vec3_key(v: Vector3) -> String:
+	return "%.3f,%.3f,%.3f" % [v.x, v.y, v.z]
 
 
 func build_wire_graph() -> void:
