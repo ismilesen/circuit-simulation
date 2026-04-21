@@ -98,6 +98,8 @@ func draw_wire(wire: Dictionary) -> void:
 		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		label.modulate = Color(0.7, 0.7, 0.7)
 		label.outline_size = 8
+		label.no_depth_test = true
+		label.extra_cull_margin = 5.0
 		label.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 		_vis.add_child(label)
 
@@ -171,10 +173,10 @@ func draw_component(comp: Dictionary, parser) -> void:
 	if type == "ipin" or type == "input_pin":
 		_vis._input_positions.append(pos)
 
-	# "primitive" sym files carry their own T-line texts (symname, name, pin labels)
-	# rendered by CircuitSymbol._add_sym_text — skip the external billboard label to
-	# avoid duplication.
-	if mat_type == "primitive":
+	# label/ipin/opin render their net name via sym T {@lab} texts positioned beside the
+	# pin arrow geometry — skip the external billboard to avoid duplicates.
+	if mat_type == "label" or mat_type == "ipin" or mat_type == "opin" \
+			or mat_type == "input_pin" or mat_type == "output_pin":
 		return
 
 	var comp_label: String = comp.get("label", "")
@@ -183,6 +185,9 @@ func draw_component(comp: Dictionary, parser) -> void:
 	var label_text: String
 	if comp_label != "":
 		label_text = comp_label
+	elif is_transistor:
+		# Transistors: instance name only — shape + color already conveys nmos/pmos.
+		label_text = inst_name if inst_name != "" else sym_base
 	elif sym_base != "" and inst_name != "":
 		label_text = sym_base + "\n" + inst_name
 	elif sym_base != "":
@@ -197,6 +202,8 @@ func draw_component(comp: Dictionary, parser) -> void:
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	label.modulate = mat.albedo_color
 	label.outline_size = 8
+	label.no_depth_test = true
+	label.extra_cull_margin = 5.0
 	label.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 	_vis.add_child(label)
 
