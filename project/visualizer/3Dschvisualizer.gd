@@ -14,7 +14,7 @@ const _WIRE_FILL_SHADER = preload("res://visualizer/wire_fill.gdshader")
 ## Minimum |ΔV| / Vmax that triggers a cursor (lower = more sensitive).
 @export var dv_anim_threshold: float = 0.04
 
-var parser: Variant = null
+var parser: SchParser
 var _sidebar: SidebarPanel = null
 var _floor: MeshInstance3D = null
 
@@ -91,12 +91,7 @@ var _anim_player:    VisAnimPlayer
 
 
 func _ready() -> void:
-	if ClassDB.class_exists("SchParser"):
-		parser = ClassDB.instantiate("SchParser")
-	else:
-		push_error("SchParser class is unavailable. Ensure the GDExtension loaded correctly.")
-		return
-
+	parser = SchParser.new()
 	_materials = VisMaterialFactory.build_materials()
 	_floor = VisMaterialFactory.create_floor(self)
 	_scene_builder  = VisSceneBuilder.new(self)
@@ -112,10 +107,6 @@ func _process(delta: float) -> void:
 # ---------- Schematic loading ----------
 
 func load_schematic(path: String) -> bool:
-	if parser == null:
-		push_error("SchParser is not initialized.")
-		return false
-
 	if not parser.parse_file(path):
 		push_error("Failed to parse: " + path)
 		return false
@@ -139,25 +130,14 @@ func load_schematic(path: String) -> bool:
 # ---------- UI setup ----------
 
 func _setup_upload_ui() -> void:
-	var sim: Node = null
-	var sim_packed: Resource = load("res://circuit_simulator.tscn")
-	if sim_packed is PackedScene:
-		sim = (sim_packed as PackedScene).instantiate()
-	else:
-		# Fallback for repos that have the simulator script but no wrapper scene.
-		var sim_script: Resource = load("res://simulator/circuit_simulator.gd")
-		if sim_script is GDScript:
-			var created: Variant = (sim_script as GDScript).new()
-			if created is Node:
-				sim = created as Node
-
-	if sim != null:
+	var sim_packed = load("res://circuit_simulator.tscn")
+	if sim_packed != null:
+		var sim := (sim_packed as PackedScene).instantiate()
 		sim.name = "CircuitSimulator"
-		if sim.has_signal("simulation_finished"):
-			sim.connect("simulation_finished", Callable(self, "_on_simulation_finished"))
+		sim.simulation_finished.connect(_on_simulation_finished)
 		get_parent().add_child.call_deferred(sim)
 	else:
-		push_warning("Could not create CircuitSimulator (missing res://circuit_simulator.tscn and/or res://simulator/circuit_simulator.gd). Simulation will be unavailable.")
+		push_warning("Could not load res://circuit_simulator.tscn — simulation will be unavailable.")
 
 	_sidebar = SidebarPanel.new()
 	_sidebar.name = "Sidebar"

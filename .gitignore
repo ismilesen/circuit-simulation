@@ -37,7 +37,7 @@ Thumbs.db
 *.swp
 *.swo
 
-# Library folders
 
+# Library folders
 project/schematics/
 project/symbols/
