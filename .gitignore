@@ -23,8 +23,6 @@ project/bin/*.dylib
 project/bin/*.wasm
 project/bin/*.exp
 project/bin/*.lib
-project/bin/*.gdextension
-project/bin/*.gdextension.uid
 
 # Export
 # export_presets.cfg SHARED EXPORT SETTINGS
