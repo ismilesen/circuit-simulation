@@ -25,7 +25,7 @@ project/bin/*.exp
 project/bin/*.lib
 
 # Export
-export_presets.cfg
+# export_presets.cfg SHARED EXPORT SETTINGS
 
 # OS
 .DS_Store
