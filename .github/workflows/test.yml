@@ -197,6 +197,7 @@ jobs:
           mkdir -p project/bin
           scons platform=linux target=template_debug
           scons platform=linux target=template_release
+          scons platform=web target=template_debug threads=no
           scons platform=web target=template_release threads=no
 
       - name: Check build
@@ -206,19 +207,28 @@ jobs:
         run: |
           set -euo pipefail
           BIN_DIR="project/bin"
-          ACTUAL="$(ls "$BIN_DIR"/libcircuit_sim.web.template_release.wasm32*.wasm 2>/dev/null | head -n 1 || true)"
-          if [ -z "$ACTUAL" ]; then
+          ACTUAL_RELEASE="$(ls "$BIN_DIR"/libcircuit_sim.web.template_release.wasm32*.wasm 2>/dev/null | head -n 1 || true)"
+          ACTUAL_DEBUG="$(ls "$BIN_DIR"/libcircuit_sim.web.template_debug.wasm32*.wasm 2>/dev/null | head -n 1 || true)"
+          if [ -z "$ACTUAL_RELEASE" ]; then
             echo "Could not find built web release wasm in $BIN_DIR"
             ls -la "$BIN_DIR"
             exit 1
           fi
+          if [ -z "$ACTUAL_DEBUG" ]; then
+            ACTUAL_DEBUG="$ACTUAL_RELEASE"
+          fi
 
           for EXPECTED in \
             "$BIN_DIR/libcircuit_sim.web.template_release.wasm32.wasm" \
-            "$BIN_DIR/libcircuit_sim.web.template_release.wasm32.nothreads.wasm"
+            "$BIN_DIR/libcircuit_sim.web.template_release.wasm32.nothreads.wasm" \
+            "$BIN_DIR/libcircuit_sim.web.template_debug.wasm32.wasm" \
+            "$BIN_DIR/libcircuit_sim.web.template_debug.wasm32.nothreads.wasm"
           do
             if [ ! -f "$EXPECTED" ]; then
-              cp "$ACTUAL" "$EXPECTED"
+              case "$EXPECTED" in
+                *template_debug*) cp "$ACTUAL_DEBUG" "$EXPECTED" ;;
+                *) cp "$ACTUAL_RELEASE" "$EXPECTED" ;;
+              esac
             fi
           done
 
