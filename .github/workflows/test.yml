@@ -202,21 +202,41 @@ jobs:
       - name: Check build
         run: ls project/bin
 
-      - name: Normalize web GDExtension filename
+      - name: Normalize web GDExtension filenames
         run: |
           set -euo pipefail
-          EXPECTED="project/bin/libcircuit_sim.web.template_release.wasm32.nothreads.wasm"
-          if [ ! -f "$EXPECTED" ]; then
-            ACTUAL="$(ls project/bin/libcircuit_sim.web.template_release.wasm32*.nothreads*.wasm | head -n 1 || true)"
-            if [ -z "$ACTUAL" ]; then
-              ACTUAL="$(ls project/bin/libcircuit_sim.web.template_release.wasm32*.wasm | head -n 1 || true)"
+          BIN_DIR="project/bin"
+          ACTUAL="$(ls "$BIN_DIR"/libcircuit_sim.web.template_release.wasm32*.wasm 2>/dev/null | head -n 1 || true)"
+          if [ -z "$ACTUAL" ]; then
+            echo "Could not find built web release wasm in $BIN_DIR"
+            ls -la "$BIN_DIR"
+            exit 1
+          fi
+
+          for EXPECTED in \
+            "$BIN_DIR/libcircuit_sim.web.template_release.wasm32.wasm" \
+            "$BIN_DIR/libcircuit_sim.web.template_release.wasm32.nothreads.wasm"
+          do
+            if [ ! -f "$EXPECTED" ]; then
+              cp "$ACTUAL" "$EXPECTED"
             fi
-            if [ -z "$ACTUAL" ]; then
-              echo "Could not find built web release wasm in project/bin/"
-              ls -la project/bin
-              exit 1
+          done
+
+      - name: Validate referenced web GDExtension binaries exist
+        run: |
+          set -euo pipefail
+          missing=0
+          while IFS= read -r rel_path; do
+            [ -n "$rel_path" ] || continue
+            file_path="project/$rel_path"
+            if [ ! -f "$file_path" ]; then
+              echo "Missing web GDExtension library referenced by circuit_sim.gdextension: $file_path"
+              missing=1
             fi
-            cp "$ACTUAL" "$EXPECTED"
+          done < <(grep -E '^web\.(debug|release)\.wasm32' project/circuit_sim.gdextension | sed -E 's/.*"res:\/\/([^"]+)".*/\1/')
+          if [ "$missing" -ne 0 ]; then
+            ls -la project/bin
+            exit 1
           fi
 
       - name: Export Web builds
