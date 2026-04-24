@@ -192,6 +192,10 @@ jobs:
           curl -L https://raw.githubusercontent.com/ngspice/ngspice/master/src/include/ngspice/sharedspice.h \
             -o ngspice/sharedspice.h
 
+      - name: Remove legacy duplicate GDExtension descriptor
+        run: |
+          rm -f project/bin/circuit_sim.gdextension project/bin/circuit_sim.gdextension.uid
+
       - name: Build GDExtension libraries
         run: |
           mkdir -p project/bin
@@ -208,43 +212,38 @@ jobs:
           set -euo pipefail
           BIN_DIR="project/bin"
           ACTUAL_RELEASE="$(ls "$BIN_DIR"/libcircuit_sim.web.template_release.wasm32*.wasm 2>/dev/null | head -n 1 || true)"
-          ACTUAL_DEBUG="$(ls "$BIN_DIR"/libcircuit_sim.web.template_debug.wasm32*.wasm 2>/dev/null | head -n 1 || true)"
           if [ -z "$ACTUAL_RELEASE" ]; then
             echo "Could not find built web release wasm in $BIN_DIR"
             ls -la "$BIN_DIR"
             exit 1
           fi
-          if [ -z "$ACTUAL_DEBUG" ]; then
-            ACTUAL_DEBUG="$ACTUAL_RELEASE"
-          fi
 
           for EXPECTED in \
             "$BIN_DIR/libcircuit_sim.web.template_release.wasm32.wasm" \
-            "$BIN_DIR/libcircuit_sim.web.template_release.wasm32.nothreads.wasm" \
-            "$BIN_DIR/libcircuit_sim.web.template_debug.wasm32.wasm" \
-            "$BIN_DIR/libcircuit_sim.web.template_debug.wasm32.nothreads.wasm"
+            "$BIN_DIR/libcircuit_sim.web.template_release.wasm32.nothreads.wasm"
           do
             if [ ! -f "$EXPECTED" ]; then
-              case "$EXPECTED" in
-                *template_debug*) cp "$ACTUAL_DEBUG" "$EXPECTED" ;;
-                *) cp "$ACTUAL_RELEASE" "$EXPECTED" ;;
-              esac
+              cp "$ACTUAL_RELEASE" "$EXPECTED"
             fi
           done
 
-      - name: Validate referenced web GDExtension binaries exist
+      - name: Validate release web GDExtension binary exists
         run: |
           set -euo pipefail
-          missing=0
-          while IFS= read -r rel_path; do
-            [ -n "$rel_path" ] || continue
-            file_path="project/$rel_path"
-            if [ ! -f "$file_path" ]; then
-              echo "Missing web GDExtension library referenced by circuit_sim.gdextension: $file_path"
-              missing=1
-            fi
-          done < <(grep -E '^web\.(debug|release)\.wasm32' project/circuit_sim.gdextension | sed -E 's/.*"res:\/\/([^"]+)".*/\1/')
-          if [ "$missing" -ne 0 ]; then
+          gdext_count="$(find project -type f -name '*.gdextension' | wc -l | tr -d ' ')"
+          if [ "$gdext_count" -ne 1 ]; then
+            echo "Expected exactly one .gdextension file in project/, found $gdext_count"
+            find project -type f -name '*.gdextension' -print
+            exit 1
+          fi
+          rel_path="$(grep -E '^web\.release\.wasm32' project/circuit_sim.gdextension | sed -E 's/.*"res:\/\/([^"]+)".*/\1/' | head -n 1)"
+          if [ -z "$rel_path" ]; then
+            echo "Missing web.release.wasm32 entry in project/circuit_sim.gdextension"
+            exit 1
+          fi
+          file_path="project/$rel_path"
+          if [ ! -f "$file_path" ]; then
+            echo "Missing release web GDExtension library referenced by circuit_sim.gdextension: $file_path"
             ls -la project/bin
             exit 1
           fi
@@ -288,10 +287,22 @@ jobs:
           const match = html.match(configRegex);
           if (!match) throw new Error("Could not find GODOT_CONFIG in index.html");
           const config = JSON.parse(match[1]);
-          config.gdextensionLibs = Array.isArray(config.gdextensionLibs) ? config.gdextensionLibs : [];
-          if (!config.gdextensionLibs.includes("ngspice/libngspice.so")) {
-            config.gdextensionLibs.push("ngspice/libngspice.so");
+          const libs = Array.isArray(config.gdextensionLibs) ? config.gdextensionLibs.filter(Boolean) : [];
+          const circuitLibPattern = /^libcircuit_sim\.web\.template_.*\.wasm$/;
+          const circuitLibs = libs.filter((lib) => circuitLibPattern.test(lib));
+          const preferredCircuitLib =
+            circuitLibs.find((lib) => lib.includes("template_release") && lib.includes("nothreads")) ||
+            circuitLibs.find((lib) => lib.includes("template_release")) ||
+            circuitLibs[0] ||
+            "libcircuit_sim.web.template_release.wasm32.nothreads.wasm";
+          const deduped = [];
+          for (const lib of libs) {
+            if (circuitLibPattern.test(lib)) continue;
+            if (!deduped.includes(lib)) deduped.push(lib);
           }
+          if (!deduped.includes(preferredCircuitLib)) deduped.unshift(preferredCircuitLib);
+          if (!deduped.includes("ngspice/libngspice.so")) deduped.push("ngspice/libngspice.so");
+          config.gdextensionLibs = deduped;
           html = html.replace(configRegex, `const GODOT_CONFIG = ${JSON.stringify(config)};`);
           fs.writeFileSync(htmlPath, html);
           NODE
@@ -303,6 +314,21 @@ jobs:
           test -f project/build/web/release/server.js
           test -f project/build/web/release/ngspice/libngspice.so
           grep -Eq 'ngspice/libngspice\.so' project/build/web/release/index.html
+          node <<'NODE'
+          const fs = require("fs");
+          const html = fs.readFileSync("project/build/web/release/index.html", "utf8");
+          const match = html.match(/const GODOT_CONFIG = (\{[\s\S]*?\});/);
+          if (!match) throw new Error("Could not parse GODOT_CONFIG");
+          const config = JSON.parse(match[1]);
+          const libs = Array.isArray(config.gdextensionLibs) ? config.gdextensionLibs : [];
+          const circuitLibs = libs.filter((lib) => /^libcircuit_sim\.web\.template_.*\.wasm$/.test(lib));
+          if (circuitLibs.length !== 1) {
+            throw new Error(`Expected exactly 1 libcircuit_sim web side module, found ${circuitLibs.length}: ${JSON.stringify(circuitLibs)}`);
+          }
+          if (!libs.includes("ngspice/libngspice.so")) {
+            throw new Error("ngspice/libngspice.so is missing from gdextensionLibs");
+          }
+          NODE
 
       - name: Show build output
         run: ls -R project/build/web

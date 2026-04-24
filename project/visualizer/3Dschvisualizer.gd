@@ -2,6 +2,7 @@ extends Node3D
 
 ## Preloaded once at class level so every wire shares the same Shader object.
 const _WIRE_FILL_SHADER = preload("res://visualizer/wire_fill.gdshader")
+const _SIM_SCRIPT_PATH := "res://simulator/circuit_simulator.gd"
 
 @export var scale_factor: float = 0.01
 
@@ -130,14 +131,17 @@ func load_schematic(path: String) -> bool:
 # ---------- UI setup ----------
 
 func _setup_upload_ui() -> void:
-	var sim_packed = load("res://circuit_simulator.tscn")
-	if sim_packed != null:
-		var sim := (sim_packed as PackedScene).instantiate()
-		sim.name = "CircuitSimulator"
-		sim.simulation_finished.connect(_on_simulation_finished)
-		get_parent().add_child.call_deferred(sim)
+	var sim_script := load(_SIM_SCRIPT_PATH)
+	if sim_script is Script:
+		var sim := (sim_script as Script).new()
+		if sim != null:
+			sim.name = "CircuitSimulator"
+			sim.simulation_finished.connect(_on_simulation_finished)
+			get_parent().add_child.call_deferred(sim)
+		else:
+			push_warning("Could not instantiate %s — simulation will be unavailable." % _SIM_SCRIPT_PATH)
 	else:
-		push_warning("Could not load res://circuit_simulator.tscn — simulation will be unavailable.")
+		push_warning("Could not load %s — simulation will be unavailable." % _SIM_SCRIPT_PATH)
 
 	_sidebar = SidebarPanel.new()
 	_sidebar.name = "Sidebar"

@@ -1,6 +1,6 @@
 extends Node
 
-const SIM_SCENE_PATH := "res://circuit_simulator.tscn"
+const SIM_SCRIPT_PATH := "res://simulator/circuit_simulator.gd"
 const UI_SCENE_PATH := "res://ui/upload_panel.tscn"
 
 var sim_instance: Node = null
@@ -10,12 +10,17 @@ func _ready() -> void:
 	_instance_ui()
 
 func _instance_simulator_scene() -> void:
-	var packed := load(SIM_SCENE_PATH)
-	if packed == null:
-		push_error("Could not load %s" % SIM_SCENE_PATH)
+	var sim_script := load(SIM_SCRIPT_PATH)
+	if not (sim_script is Script):
+		push_error("Could not load %s" % SIM_SCRIPT_PATH)
 		return
 
-	sim_instance = (packed as PackedScene).instantiate()
+	sim_instance = (sim_script as Script).new()
+	if sim_instance == null:
+		push_error("Could not instantiate %s" % SIM_SCRIPT_PATH)
+		return
+
+	sim_instance.name = "CircuitSimulator"
 	add_child(sim_instance)
 
 func _instance_ui() -> void:
