@@ -36,12 +36,122 @@ jobs:
         if: steps.cache-libngspice.outputs.cache-hit != 'true'
         run: docker build -f .github/docker/ngspice-wasm.Dockerfile -t ngspice-wasm-build .
 
-      - name: Extract libngspice-44.2.zip
+      - name: Build libngspice-44.2.zip
         if: steps.cache-libngspice.outputs.cache-hit != 'true'
         run: |
-          CID=$(docker create ngspice-wasm-build)
-          docker cp "$CID:/opt/pyodide-install/libngspice-44.2.zip" ./libngspice-44.2.zip
-          docker rm "$CID"
+          set -euo pipefail
+          if [ -x ./scripts/build_libngspice_wasm_docker.sh ]; then
+            ./scripts/build_libngspice_wasm_docker.sh ./libngspice-44.2.zip
+            exit 0
+          fi
+
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            ngspice-wasm-build \
+            bash -lc '
+              set -euo pipefail
+              source /opt/emsdk/emsdk_env.sh >/dev/null
+
+              apply_patch_if_needed() {
+                local patch_file="$1"
+                if patch -N -p1 --dry-run < "$patch_file" >/dev/null 2>&1; then
+                  patch -N -p1 < "$patch_file"
+                fi
+              }
+
+              mkdir -p .tmp/ngspice-web-build
+              cd .tmp/ngspice-web-build
+
+              if [ ! -f ngspice-44.2.zip ]; then
+                curl -L -o ngspice-44.2.zip https://github.com/danchitnis/ngspice-sf-mirror/archive/refs/tags/ngspice-44.2.zip
+              fi
+              if [ ! -d ngspice-sf-mirror-ngspice-44.2 ]; then
+                unzip -q ngspice-44.2.zip
+              fi
+
+              cd ngspice-sf-mirror-ngspice-44.2
+
+              apply_patch_if_needed /opt/pyodide-recipes/packages/libngspice/patches/0001-keep-alive-API-functions.patch
+              apply_patch_if_needed /opt/pyodide-recipes/packages/libngspice/patches/0002-fix-hicum2-extern-c.patch
+              apply_patch_if_needed /opt/pyodide-recipes/packages/libngspice/patches/0003-fix-verilog-install-hook.patch
+
+              bash ./autogen.sh
+
+              if [ ! -x build-native/src/xspice/cmpp/cmpp ]; then
+                mkdir -p build-native
+                cd build-native
+                ../configure --enable-xspice --disable-debug --without-x --with-readline=no
+                make -C src/xspice/cmpp -j ${PYODIDE_JOBS:-3}
+                cd ..
+              fi
+
+              rm -rf release-lib /tmp/ng-install /work/.tmp/libngspice-package
+              mkdir -p release-lib
+              cd release-lib
+
+              WASM_COMPILE_FLAGS="-O2 -fPIC -fwasm-exceptions -sSUPPORT_LONGJMP=wasm"
+              WASM_LINK_FLAGS="-fwasm-exceptions -sSIDE_MODULE=1 -sSUPPORT_LONGJMP=wasm"
+
+              ac_cv_func_queryperformancecounter=no emconfigure ../configure \
+                --prefix=/tmp/ng-install \
+                --enable-xspice \
+                --disable-debug \
+                --disable-dependency-tracking \
+                --enable-cider \
+                --with-readline=no \
+                --disable-openmp \
+                --with-ngshared \
+                --host=wasm32-unknown-emscripten \
+                CFLAGS="$WASM_COMPILE_FLAGS" \
+                CXXFLAGS="$WASM_COMPILE_FLAGS" \
+                LDFLAGS="$WASM_LINK_FLAGS"
+
+              emmake make -j ${PYODIDE_JOBS:-3} -C src/xspice/cmpp \
+                CFLAGS="$WASM_COMPILE_FLAGS" \
+                CXXFLAGS="$WASM_COMPILE_FLAGS" \
+                LDFLAGS="$WASM_LINK_FLAGS"
+              cp ../build-native/src/xspice/cmpp/cmpp src/xspice/cmpp/cmpp
+              touch src/xspice/cmpp/cmpp
+
+              emmake make -j ${PYODIDE_JOBS:-3} \
+                CFLAGS="$WASM_COMPILE_FLAGS" \
+                CXXFLAGS="$WASM_COMPILE_FLAGS" \
+                LDFLAGS="$WASM_LINK_FLAGS"
+              emmake make install
+
+              /opt/emsdk/upstream/bin/wasm-dis /tmp/ng-install/lib/libngspice.so -o /tmp/libngspice.wast
+              python3 - <<'"'"'PY'"'"'
+import re
+import sys
+s = open("/tmp/libngspice.wast", "r", errors="ignore").read()
+imports = set(re.findall(r"\(import \"env\" \"([^\"]+)\"", s))
+banned = sorted(name for name in imports if name == "emscripten_longjmp" or name.startswith("invoke_"))
+if banned:
+    print("ERROR: Incompatible imports in libngspice.so:", file=sys.stderr)
+    for name in banned:
+        print(f"  - {name}", file=sys.stderr)
+    sys.exit(1)
+PY
+
+              mkdir -p /work/.tmp/libngspice-package/ngspice/lib/ngspice
+              cp /tmp/ng-install/lib/libngspice.so /work/.tmp/libngspice-package/ngspice/libngspice.so
+              cp /tmp/ng-install/lib/ngspice/*.cm /work/.tmp/libngspice-package/ngspice/lib/ngspice/
+            '
+
+          OUT_ZIP="$PWD/libngspice-44.2.zip"
+          rm -f "$OUT_ZIP"
+          (cd .tmp/libngspice-package && zip -qry "$OUT_ZIP" ngspice)
+          if command -v zipinfo >/dev/null 2>&1; then
+            ZIP_ENTRIES="$(zipinfo -1 "$OUT_ZIP")"
+          else
+            ZIP_ENTRIES="$(unzip -l "$OUT_ZIP" | awk '"'"'NR > 3 && $0 !~ /^--------/ { print $4 }'"'"')"
+          fi
+          if ! printf "%s\n" "$ZIP_ENTRIES" | grep -Eq "(^|/)libngspice\\.so$"; then
+            echo "ERROR: Built libngspice-44.2.zip is missing libngspice.so"
+            printf "%s\n" "$ZIP_ENTRIES" | sed -n '1,120p'
+            exit 1
+          fi
 
       - name: Upload WASM ngspice artifact
         uses: actions/upload-artifact@v4
@@ -69,14 +179,14 @@ jobs:
       - name: Install Godot
         uses: chickensoft-games/setup-godot@v2
         with:
-          version: 4.5.0 # https://www.nuget.org/packages/GodotSharp#versions-body-tab
+          version: 4.6.0
           use-dotnet: false
           include-templates: true
 
       - name: Verify installed web templates
         run: |
           set -euo pipefail
-          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/4.5.stable"
+          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/4.6.stable"
           ls -la "$TEMPLATE_DIR"
           test -f "$TEMPLATE_DIR/web_dlink_nothreads_release.zip"
           test -f "$TEMPLATE_DIR/web_dlink_nothreads_debug.zip"
@@ -106,9 +216,12 @@ jobs:
       - name: Normalize web GDExtension filename
         run: |
           set -euo pipefail
-          EXPECTED="project/bin/libcircuit_sim.web.template_release.wasm32.wasm"
+          EXPECTED="project/bin/libcircuit_sim.web.template_release.wasm32.nothreads.wasm"
           if [ ! -f "$EXPECTED" ]; then
-            ACTUAL="$(ls project/bin/libcircuit_sim.web.template_release.wasm32*.wasm | head -n 1 || true)"
+            ACTUAL="$(ls project/bin/libcircuit_sim.web.template_release.wasm32*.nothreads*.wasm | head -n 1 || true)"
+            if [ -z "$ACTUAL" ]; then
+              ACTUAL="$(ls project/bin/libcircuit_sim.web.template_release.wasm32*.wasm | head -n 1 || true)"
+            fi
             if [ -z "$ACTUAL" ]; then
               echo "Could not find built web release wasm in project/bin/"
               ls -la project/bin
@@ -123,22 +236,54 @@ jobs:
           mkdir -p build/web/release
           godot --headless --export-release "Web" build/web/release/index.html
 
-      - name: Package web upload bridge
+      - name: Package web upload bridge and dev server
         run: |
           cp project/web/upload_bridge.js project/build/web/release/upload_bridge.js
+          cp project/web/server.js project/build/web/release/server.js
 
       - name: Package ngspice WASM files in web release
         run: |
-          mkdir -p project/build/web/release/ngspice
-          unzip -o ./libngspice-44.2.zip -d project/build/web/release/ngspice
-          if [ -f project/build/web/release/ngspice/ngspice/libngspice.so ] && [ ! -f project/build/web/release/ngspice/libngspice.so ]; then
-            mv project/build/web/release/ngspice/ngspice/libngspice.so project/build/web/release/ngspice/libngspice.so
+          set -euo pipefail
+          tmp_unpack="$(mktemp -d)"
+          unzip -oq ./libngspice-44.2.zip -d "$tmp_unpack"
+          found_lib="$(find "$tmp_unpack" -type f -name 'libngspice.so' | head -n 1 || true)"
+          if [ -z "$found_lib" ]; then
+            echo "ERROR: libngspice.so not found in libngspice-44.2.zip"
+            echo "Archive entries:"
+            unzip -l ./libngspice-44.2.zip | sed -n '1,120p'
+            exit 1
           fi
-          if [ -d project/build/web/release/ngspice/ngspice ]; then
-            mkdir -p project/build/web/release/ngspice/lib/ngspice
-            find project/build/web/release/ngspice/ngspice -maxdepth 1 -name '*.cm' -exec mv {} project/build/web/release/ngspice/lib/ngspice/ \;
-            rmdir project/build/web/release/ngspice/ngspice || true
-          fi
+          mkdir -p project/build/web/release/ngspice/lib/ngspice
+          cp "$found_lib" project/build/web/release/ngspice/libngspice.so
+          find "$tmp_unpack" -type f -name '*.cm' -exec cp {} project/build/web/release/ngspice/lib/ngspice/ \;
+          rm -rf "$tmp_unpack"
+
+      - name: Patch index.html ngspice preload
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("fs");
+          const htmlPath = "project/build/web/release/index.html";
+          let html = fs.readFileSync(htmlPath, "utf8");
+          const configRegex = /const GODOT_CONFIG = (\{[\s\S]*?\});/;
+          const match = html.match(configRegex);
+          if (!match) throw new Error("Could not find GODOT_CONFIG in index.html");
+          const config = JSON.parse(match[1]);
+          config.gdextensionLibs = Array.isArray(config.gdextensionLibs) ? config.gdextensionLibs : [];
+          if (!config.gdextensionLibs.includes("ngspice/libngspice.so")) {
+            config.gdextensionLibs.push("ngspice/libngspice.so");
+          }
+          html = html.replace(configRegex, `const GODOT_CONFIG = ${JSON.stringify(config)};`);
+          fs.writeFileSync(htmlPath, html);
+          NODE
+
+      - name: Validate ngspice web packaging
+        run: |
+          set -euo pipefail
+          test -f project/build/web/release/upload_bridge.js
+          test -f project/build/web/release/server.js
+          test -f project/build/web/release/ngspice/libngspice.so
+          grep -Eq 'ngspice/libngspice\.so' project/build/web/release/index.html
 
       - name: Show build output
         run: ls -R project/build/web

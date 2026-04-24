@@ -13,12 +13,14 @@ const path = require("path");
 
 const PORT = 8080;
 const SERVE_DIR = __dirname;
+const NGSPICE_SIDE_MODULE_REL_PATH = "ngspice/libngspice.so";
 
 const MIME_TYPES = {
   ".html": "text/html",
   ".js": "application/javascript",
   ".mjs": "application/javascript",
   ".wasm": "application/wasm",
+  ".so": "application/wasm",
   ".pck": "application/octet-stream",
   ".png": "image/png",
   ".svg": "image/svg+xml",
@@ -59,8 +61,42 @@ const server = http.createServer((req, res) => {
   });
 });
 
+function checkNgspiceWebSetup() {
+  const ngspiceLibPath = path.join(SERVE_DIR, "ngspice", "libngspice.so");
+  if (!fs.existsSync(ngspiceLibPath)) {
+    console.warn(
+      "WARNING: Missing ngspice side module at " + ngspiceLibPath +
+      ". Web simulation will fail to initialize until this file is present."
+    );
+  }
+
+  const indexHtmlPath = path.join(SERVE_DIR, "index.html");
+  if (!fs.existsSync(indexHtmlPath)) {
+    return;
+  }
+
+  let html = "";
+  try {
+    html = fs.readFileSync(indexHtmlPath, "utf8");
+  } catch (err) {
+    console.warn("WARNING: Could not read index.html to validate ngspice preload setup:", err.message);
+    return;
+  }
+
+  const hasNgspicePreload = html.includes(`"${NGSPICE_SIDE_MODULE_REL_PATH}"`) ||
+    html.includes(`'${NGSPICE_SIDE_MODULE_REL_PATH}'`);
+  if (!hasNgspicePreload) {
+    console.warn(
+      "WARNING: index.html does not preload " + NGSPICE_SIDE_MODULE_REL_PATH +
+      " in GODOT_CONFIG.gdextensionLibs. Browser dlopen will fail with " +
+      "'synchronous loading of external files is not available'."
+    );
+  }
+}
+
 server.listen(PORT, () => {
   console.log("Serving from:", SERVE_DIR);
   console.log("Open http://localhost:" + PORT);
   console.log("COOP/COEP headers active (required for threads + GDExtensions)");
+  checkNgspiceWebSetup();
 });

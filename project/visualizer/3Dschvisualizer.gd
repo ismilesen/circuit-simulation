@@ -197,27 +197,26 @@ func _on_simulation_finished() -> void:
 		push_warning("Visualizer: CircuitSimulator not found after simulation_finished")
 		return
 
-	var names: PackedStringArray = sim.call("get_last_sim_signal_names")
-	var snapshot: Array = sim.call("get_last_sim_snapshot")
+	if not sim.has_method("get_continuous_memory_signal_names") or not sim.has_method("get_continuous_memory_snapshot"):
+		push_warning("Visualizer: simulator does not expose continuous memory snapshot methods")
+		return
+
+	var names: PackedStringArray = sim.call("get_continuous_memory_signal_names")
+	var snapshot: Array = sim.call("get_continuous_memory_snapshot")
 	print("Visualizer: buffer has %d signal names, %d samples" % [names.size(), snapshot.size()])
 	if names.size() > 0:
 		print("Visualizer: signal names = ", Array(names))
 
-	if names.size() > 0 and snapshot.size() > 0:
-		var all_vecs: Dictionary = {}
-		for i: int in range(names.size()):
-			var col: Array = []
-			col.resize(snapshot.size())
-			for s: int in range(snapshot.size()):
-				var row: PackedFloat64Array = snapshot[s]
-				col[s] = float(row[i]) if i < row.size() else 0.0
-			all_vecs[str(names[i])] = col
-		_anim_player.load_sim_data(all_vecs)
+	if names.is_empty() or snapshot.is_empty():
+		push_warning("Visualizer: simulation_finished but no buffered vectors available")
 		return
 
-	push_warning("Visualizer: callback buffer empty — falling back to get_all_vectors()")
-	var all_vecs: Dictionary = sim.call("get_all_vectors")
-	if all_vecs.is_empty():
-		push_warning("Visualizer: simulation_finished but no vectors available")
-		return
+	var all_vecs: Dictionary = {}
+	for i: int in range(names.size()):
+		var col: Array = []
+		col.resize(snapshot.size())
+		for s: int in range(snapshot.size()):
+			var row: PackedFloat64Array = snapshot[s]
+			col[s] = float(row[i]) if i < row.size() else 0.0
+		all_vecs[str(names[i])] = col
 	_anim_player.load_sim_data(all_vecs)

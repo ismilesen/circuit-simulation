@@ -37,7 +37,7 @@ text = "Circuit Upload"
 layout_mode = 2
 theme_override_colors/font_color = Color(1, 1, 1, 1)
 theme_override_font_sizes/font_size = 13
-text = "Upload or drop your circuit files, we save copies in a safe 'uploads' folder, then (on Windows/macOS/Linux) we run ngspice to generate the data Godot will visualize."
+text = "Upload or drop your circuit files, we save copies in a safe 'uploads' folder, then run ngspice to generate the data Godot will visualize."
 autowrap_mode = 3
 
 [node name="ControlsRow" type="HBoxContainer" parent="Margin/VBox"]

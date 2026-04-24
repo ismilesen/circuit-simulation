@@ -356,10 +356,6 @@ func _on_run_pressed() -> void:
 		_set_error("Selected file is not a supported type. Choose .sch, .spice, .cir, .net, or .txt.")
 		return
 
-	if OS.has_feature("web"):
-		_set_error("Web build: ngspice runtime is not supported yet, staging works though.")
-		return
-
 	# Auto-load the paired schematic (same base name) so the 3D scene and
 	# net→wire mapping are ready before simulation results arrive.
 	var sch_pair: Dictionary = _find_matching_sch(entry)
@@ -388,7 +384,10 @@ func _on_run_pressed() -> void:
 	_refresh_status("native: initializing ngspice…", StatusTone.WARN)
 	var init_ok: Variant = _sim.call("initialize_ngspice")
 	if not bool(init_ok):
-		_set_error("initialize_ngspice() returned false.")
+		if OS.has_feature("web"):
+			_set_error("initialize_ngspice() returned false. Web build expects ngspice/libngspice.so beside index.html.")
+		else:
+			_set_error("initialize_ngspice() returned false.")
 		return
 
 	_refresh_status("native: loading netlist…", StatusTone.WARN)
@@ -408,26 +407,6 @@ func _on_run_pressed() -> void:
 	if effective_pdk_root.is_empty():
 		effective_pdk_root = OS.get_environment("PDK_ROOT")
 
-	# Detect bare subcircuit files (.subckt/.ends with no analysis) and auto-wrap in memory.
-	var subckt_info: Dictionary = _parse_subcircuit_info(os_path)
-	if not subckt_info.is_empty() and _sim.has_method("load_netlist_string"):
-		var wrapper: String = _build_sim_wrapper(
-			os_path,
-			str(subckt_info["name"]),
-			subckt_info["ports"] as Array,
-			effective_pdk_root
-		)
-		_log("[color=lightblue]Subcircuit detected:[/color] %s — auto-generating stimulus" % str(subckt_info["name"]))
-		_refresh_status("native: loading subcircuit…", StatusTone.WARN)
-		var loaded: bool = bool(_sim.call("load_netlist_string", wrapper))
-		if not loaded:
-			_set_error("Failed to load auto-generated wrapper. Check ngspice output.")
-			return
-		# The wrapper deck contains .tran — bg_run picks it up and fires simulation_finished.
-		_refresh_status("native: running simulation on subcircuit…", StatusTone.WARN)
-		_sim.call("run_simulation")
-		return
-
 	if _sim.has_method("load_netlist"):
 		_refresh_status("native: running spice pipeline…", StatusTone.WARN)
 		var run_result: Variant = _sim.call("load_netlist", os_path, effective_pdk_root)
@@ -444,30 +423,26 @@ func _on_run_pressed() -> void:
 		_refresh_status("native: netlist loaded (%d result fields)" % key_count, StatusTone.OK)
 		_log("[color=lime]Netlist loaded.[/color] Result keys: %s" % [str(result_dict.keys())])
 
-	if not auto_start_continuous:
-		# Always use bg_run so simulation_finished fires and the visualizer can animate.
-		# load_netlist preserves top-level .tran commands; bg_run executes them in the background.
-		_refresh_status("native: running simulation (bg_run)…", StatusTone.WARN)
-		_log("[color=lightblue]Starting simulation (bg_run)…[/color]")
-		_sim.call("run_simulation")
+	if not _sim.has_method("start_continuous_transient"):
+		_set_error("CircuitSimulator build does not expose start_continuous_transient().")
+		return
 
-	if auto_start_continuous and _sim.has_method("start_continuous_transient"):
-			_configure_stream_output_if_enabled()
-			var started: bool = bool(_sim.call("start_continuous_transient", continuous_step, continuous_window, continuous_sleep_ms))
-			if started:
-				_refresh_status("native: continuous transient started", StatusTone.OK)
-			else:
-				_set_error("Failed to start continuous transient loop.")
+	# The current simulator API drives execution through start_continuous_transient().
+	if _sim.has_method("is_continuous_transient_running") and bool(_sim.call("is_continuous_transient_running")):
+		_sim.call("stop_continuous_transient")
+	_configure_stream_output_if_enabled()
+	_refresh_status("native: starting transient stream…", StatusTone.WARN)
+	var started: bool = bool(_sim.call("start_continuous_transient", continuous_step, continuous_window, continuous_sleep_ms))
+	if started:
+		_refresh_status("native: transient stream started", StatusTone.OK)
+	else:
+		_set_error("Failed to start transient stream.")
 	return
 
 	_set_error("CircuitSimulator build does not expose load_netlist().")
 
 # Toggles continuous transient mode for the loaded netlist.
 func _on_continuous_pressed() -> void:
-	if OS.has_feature("web"):
-		_set_error("Web build: continuous ngspice mode is not supported.")
-		return
-
 	_sim = _resolve_simulator()
 	if _sim == null:
 		_set_error("Could not find CircuitSimulator node.")
@@ -486,15 +461,6 @@ func _on_continuous_pressed() -> void:
 
 	# Ensure a deck is loaded before starting continuous streaming.
 	_on_run_pressed()
-	if _sim == null:
-		return
-
-	if bool(_sim.call("is_continuous_transient_running")):
-		return
-	_configure_stream_output_if_enabled()
-	var started: bool = bool(_sim.call("start_continuous_transient", continuous_step, continuous_window, continuous_sleep_ms))
-	if not started:
-		_set_error("Failed to start continuous transient loop.")
 
 # Updates UI after one-shot simulation completion.
 func _on_sim_finished() -> void:
@@ -883,6 +849,7 @@ func _on_clear_pressed() -> void:
 	if run_button != null:
 		run_button.text = "Run Once"
 	if continuous_button != null:
+		continuous_button.disabled = false
 		continuous_button.text = "Start Continuous"
 	_refresh_status("staging cleared", StatusTone.WARN)
 
@@ -1260,67 +1227,3 @@ func _parse_spice_value(s: String) -> float:
 			if num != 0.0:
 				return num * float(suffixes[suffix])
 	return float(lower)
-
-
-# Returns {name, ports} if the file is a bare subcircuit definition with no top-level
-# analysis commands (.tran/.ac/.dc/.op). Returns {} for complete decks or non-spice files.
-func _parse_subcircuit_info(path: String) -> Dictionary:
-	var text: String = FileAccess.get_file_as_string(path)
-	if text.is_empty():
-		return {}
-	var subckt_name: String = ""
-	var ports: Array[String] = []
-	var found_ends: bool = false
-	var has_analysis: bool = false
-	for raw_line: String in text.split("\n"):
-		var line: String = raw_line.strip_edges().to_lower()
-		if line.begins_with(".subckt "):
-			var parts: PackedStringArray = raw_line.strip_edges().split(" ", false)
-			if parts.size() >= 2:
-				subckt_name = parts[1]
-				for i: int in range(2, parts.size()):
-					ports.append(parts[i])
-		elif line.begins_with(".ends"):
-			found_ends = true
-		elif line.begins_with(".tran") or line.begins_with(".ac") or line.begins_with(".dc") or line.begins_with(".op"):
-			has_analysis = true
-	if subckt_name != "" and found_ends and not has_analysis:
-		return {"name": subckt_name, "ports": ports}
-	return {}
-
-
-# Builds a complete simulatable SPICE deck in memory from a bare subcircuit definition.
-# Classifies ports as power rails, clocks, data inputs, or outputs and adds appropriate sources.
-func _build_sim_wrapper(os_path: String, subckt_name: String, ports: Array, pdk_root: String) -> String:
-	var lines: Array[String] = []
-	lines.append("* Auto-simulation wrapper for " + subckt_name)
-	var abs_path: String = os_path.replace("\\", "/")
-	if pdk_root != "":
-		lines.append(".lib \"" + pdk_root.replace("\\", "/") + "/sky130A/libs.tech/combined/sky130.lib.spice\" tt")
-	lines.append(".include \"" + abs_path + "\"")
-	lines.append(".nodeset all=0.9")
-	lines.append("")
-	var pwr_high: Array = ["VPWR", "VDD", "VPB"]
-	var pwr_low: Array = ["VGND", "GND", "VSS", "VNB"]
-	var output_hints: Array = ["Q", "QN", "Z", "Y", "OUT"]
-	var inst_line: String = "X_dut"
-	for port: String in ports:
-		inst_line += " " + port
-		var pu: String = port.to_upper()
-		if pwr_high.has(pu):
-			lines.append("V%s %s 0 1.8" % [port, port])
-		elif pwr_low.has(pu):
-			lines.append("V%s %s 0 0" % [port, port])
-		elif output_hints.has(pu):
-			pass  # output — driven by circuit, no source needed
-		elif "CLK" in pu or "CK" in pu:
-			lines.append("V%s %s 0 PULSE(0 1.8 0 2n 2n 100n 200n)" % [port, port])
-		else:
-			lines.append("V%s %s 0 PULSE(0 1.8 50n 2n 2n 200n 400n)" % [port, port])
-	inst_line += " " + subckt_name
-	lines.append("")
-	lines.append(inst_line)
-	lines.append("")
-	lines.append(".tran 2n 1200n")
-	lines.append(".end")
-	return "\n".join(lines)

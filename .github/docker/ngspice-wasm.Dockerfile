@@ -27,11 +27,8 @@ RUN git clone https://github.com/emscripten-core/emsdk.git "${EMSDK_DIR}" \
     && ./emsdk install "${EMS_VERSION}" \
     && ./emsdk activate "${EMS_VERSION}"
 
-# Build libngspice WASM package.
+# Build and cache pyodide recipe dependencies in the image.
 RUN cd "${PYODIDE_RECIPES_DIR}" \
     && source "${EMSDK_DIR}/emsdk_env.sh" \
     && mkdir -p "${PYODIDE_INSTALL_DIR}" \
     && pyodide build-recipes libngspice --install --install-dir="${PYODIDE_INSTALL_DIR}"
-
-RUN cd "${PYODIDE_INSTALL_DIR}" \
-    && zip -r libngspice-44.2.zip .
