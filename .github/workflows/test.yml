@@ -121,18 +121,7 @@ jobs:
               emmake make install
 
               /opt/emsdk/upstream/bin/wasm-dis /tmp/ng-install/lib/libngspice.so -o /tmp/libngspice.wast
-              python3 - <<'"'"'PY'"'"'
-import re
-import sys
-s = open("/tmp/libngspice.wast", "r", errors="ignore").read()
-imports = set(re.findall(r"\(import \"env\" \"([^\"]+)\"", s))
-banned = sorted(name for name in imports if name == "emscripten_longjmp" or name.startswith("invoke_"))
-if banned:
-    print("ERROR: Incompatible imports in libngspice.so:", file=sys.stderr)
-    for name in banned:
-        print(f"  - {name}", file=sys.stderr)
-    sys.exit(1)
-PY
+              python3 -c '"'"'import re,sys; s=open("/tmp/libngspice.wast","r",errors="ignore").read(); imports=set(re.findall(r"\(import \"env\" \"([^\"]+)\"", s)); banned=sorted(name for name in imports if name=="emscripten_longjmp" or name.startswith("invoke_")); (print("ERROR: Incompatible imports in libngspice.so:", file=sys.stderr), [print(f"  - {name}", file=sys.stderr) for name in banned], sys.exit(1)) if banned else None'"'"'
 
               mkdir -p /work/.tmp/libngspice-package/ngspice/lib/ngspice
               cp /tmp/ng-install/lib/libngspice.so /work/.tmp/libngspice-package/ngspice/libngspice.so
