@@ -288,6 +288,16 @@ PY
       - name: Show build output
         run: ls -R project/build/web
 
+      - name: Prepare Pages artifact (web build only)
+        run: |
+          set -euo pipefail
+          rm -rf pages-dist
+          mkdir -p pages-dist
+          cp -R project/build/web/release/. pages-dist/
+          test -f pages-dist/index.html
+          test -f pages-dist/index.pck
+          test -f pages-dist/index.wasm
+
       - name: Upload web release artifact
         uses: actions/upload-artifact@v4
         with:
@@ -298,7 +308,7 @@ PY
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: project/build/web/release
+          path: pages-dist
 
   deploy-pages:
     name: Deploy to GitHub Pages
