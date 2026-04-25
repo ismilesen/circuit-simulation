@@ -133,11 +133,13 @@ func load_schematic(path: String) -> bool:
 func _setup_upload_ui() -> void:
 	var sim_script := load(_SIM_SCRIPT_PATH)
 	if sim_script is Script:
-		var sim := (sim_script as Script).new()
-		if sim != null:
-			sim.name = "CircuitSimulator"
-			sim.simulation_finished.connect(_on_simulation_finished)
-			get_parent().add_child.call_deferred(sim)
+		var sim_obj: Variant = (sim_script as Script).new()
+		if sim_obj is Node:
+			var sim_node: Node = sim_obj
+			sim_node.name = "CircuitSimulator"
+			if sim_node.has_signal("simulation_finished"):
+				sim_node.connect("simulation_finished", Callable(self, "_on_simulation_finished"))
+			get_parent().add_child.call_deferred(sim_node)
 		else:
 			push_warning("Could not instantiate %s — simulation will be unavailable." % _SIM_SCRIPT_PATH)
 	else:

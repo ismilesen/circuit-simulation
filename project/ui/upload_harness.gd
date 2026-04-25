@@ -15,11 +15,12 @@ func _instance_simulator_scene() -> void:
 		push_error("Could not load %s" % SIM_SCRIPT_PATH)
 		return
 
-	sim_instance = (sim_script as Script).new()
-	if sim_instance == null:
+	var sim_obj: Variant = (sim_script as Script).new()
+	if not (sim_obj is Node):
 		push_error("Could not instantiate %s" % SIM_SCRIPT_PATH)
 		return
 
+	sim_instance = sim_obj as Node
 	sim_instance.name = "CircuitSimulator"
 	add_child(sim_instance)
 
