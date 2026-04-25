@@ -14,7 +14,6 @@
 #include <iomanip>
 #include <thread>
 #include <chrono>
-#include <unordered_set>
 
 using namespace godot;
 namespace fs = std::filesystem;
@@ -501,14 +500,10 @@ bool CircuitSimulator::load_ngspice_library() {
 
     String attempted_paths;
     String last_error;
-    std::unordered_set<std::string> tried_candidates;
     for (const std::string &raw_candidate : candidates) {
         std::string candidate = raw_candidate;
         while (candidate.rfind("./", 0) == 0) {
             candidate = candidate.substr(2);
-        }
-        if (!tried_candidates.insert(candidate).second) {
-            continue;
         }
 
         ngspice_handle = dlopen(candidate.c_str(), RTLD_NOW);
