@@ -343,6 +343,154 @@ jobs:
           test -f pages-dist/index.pck
           test -f pages-dist/index.wasm
 
+      - name: Download sky130 and xschem symbol libraries
+        run: |
+          set -euo pipefail
+
+          mkdir -p pages-dist/symbols
+
+          # ── Helper: fetch all .sym/.sch from one subdirectory of a repo ──
+          fetch_sym_dir() {
+            local REPO="$1"      # e.g. StefanSchippers/xschem_sky130
+            local BRANCH="$2"    # e.g. main
+            local SUBDIR="$3"    # e.g. sky130_fd_pr  (empty string = repo root)
+            local DEST="$4"      # local destination dir under pages-dist/symbols/
+
+            echo "Fetching ${REPO}/${SUBDIR} → pages-dist/symbols/${DEST}"
+
+            # GitHub Trees API returns every path in the repo recursively
+            local API_URL="https://api.github.com/repos/${REPO}/git/trees/${BRANCH}?recursive=1"
+            local TREE
+            TREE="$(curl -sf \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$API_URL")"
+
+            # Filter to .sym and .sch files under SUBDIR, then download each
+            echo "$TREE" \
+              | python3 - "$SUBDIR" "$REPO" "$BRANCH" "$DEST" <<'PYEOF'
+          import sys, json, os, urllib.request, pathlib
+
+          subdir, repo, branch, dest = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+          data   = json.load(sys.stdin)
+          errors = 0
+
+          for item in data.get("tree", []):
+              p = item["path"]
+              # Must be under the requested subdir (or root if subdir is empty)
+              if subdir and not (p == subdir or p.startswith(subdir + "/")):
+                  continue
+              if not (p.endswith(".sym") or p.endswith(".sch")):
+                  continue
+
+              # Strip the subdir prefix to get the relative path inside dest
+              rel = p[len(subdir):].lstrip("/") if subdir else p
+              out = pathlib.Path("pages-dist/symbols") / dest / rel
+              out.parent.mkdir(parents=True, exist_ok=True)
+
+              url = f"https://raw.githubusercontent.com/{repo}/{branch}/{p}"
+              try:
+                  urllib.request.urlretrieve(url, out)
+              except Exception as e:
+                  print(f"WARN: failed {url}: {e}", file=sys.stderr)
+                  errors += 1
+
+          print(f"  done — {errors} errors")
+          PYEOF
+          }
+
+          # ── sky130 primitive devices (nfet, pfet, diodes, resistors, caps…) ──
+          fetch_sym_dir \
+            "StefanSchippers/xschem_sky130" "main" \
+            "sky130_fd_pr" \
+            "sky130_fd_pr"
+
+          # ── sky130 standard cells (inverters, nands, flops…) ──
+          fetch_sym_dir \
+            "StefanSchippers/xschem_sky130" "main" \
+            "sky130_fd_sc_hd" \
+            "sky130_fd_sc_hd"
+
+          # ── xschem built-in devices (gnd, vdd, vsource, iprobe, code…) ──
+          fetch_sym_dir \
+            "StefanSchippers/xschem" "master" \
+            "xschem_library/devices" \
+            "xschem_library/devices"
+
+          echo "Symbol tree:"
+          find pages-dist/symbols -type f | sort | head -60
+
+      - name: Generate symbol index
+        run: |
+          node <<'NODE'
+          const fs   = require("fs");
+          const path = require("path");
+
+          // Recursively collect all .sym and .sch under a directory
+          function scan(dir, urlPrefix) {
+            const out = {};
+            if (!fs.existsSync(dir)) return out;
+
+            function walk(current) {
+              for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+                const full = path.join(current, entry.name);
+                if (entry.isDirectory()) {
+                  walk(full);
+                } else if (entry.name.endsWith(".sym") || entry.name.endsWith(".sch")) {
+                  // Key: path relative to pages-dist/symbols/, no extension
+                  // e.g. "sky130_fd_pr/nfet_01v8"
+                  // This matches exactly what appears inside .sch C-line braces
+                  const rel = path.relative("pages-dist/symbols", full)
+                                .replace(/\\/g, "/")
+                                .replace(/\.(sym|sch)$/, "");
+                  out[rel] = "symbols/" + path.relative("pages-dist/symbols", full)
+                                .replace(/\\/g, "/");
+                }
+              }
+            }
+            walk(dir);
+            return out;
+          }
+
+          const index = {
+            ...scan("pages-dist/symbols/sky130_fd_pr",    "sky130_fd_pr"),
+            ...scan("pages-dist/symbols/sky130_fd_sc_hd", "sky130_fd_sc_hd"),
+            ...scan("pages-dist/symbols/xschem_library",  "xschem_library"),
+          };
+
+          fs.writeFileSync(
+            "pages-dist/symbols/index.json",
+            JSON.stringify(index, null, 2)
+          );
+
+          console.log(`Symbol index written: ${Object.keys(index).length} entries`);
+          // Print a few examples so the log is easy to verify
+          Object.entries(index).slice(0, 5).forEach(([k, v]) =>
+            console.log(`  ${k}  →  ${v}`)
+          );
+          NODE
+
+      - name: Validate symbol packaging
+        run: |
+          set -euo pipefail
+          # Must have the index
+          test -f pages-dist/symbols/index.json
+
+          # Must have at least the core primitive devices
+          test -f pages-dist/symbols/sky130_fd_pr/nfet_01v8.sym || \
+            test -f pages-dist/symbols/sky130_fd_pr/sky130_fd_pr__nfet_01v8.sym
+
+          # Must have xschem builtins
+          test -f pages-dist/symbols/xschem_library/devices/gnd.sym
+
+          # Index must not be empty
+          python3 -c "
+          import json
+          idx = json.load(open('pages-dist/symbols/index.json'))
+          assert len(idx) > 50, f'Index too small: {len(idx)} entries'
+          print(f'OK — {len(idx)} symbols indexed')
+          "
+          
       - name: Upload web release artifact
         uses: actions/upload-artifact@v4
         with:
