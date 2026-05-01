@@ -342,7 +342,7 @@ jobs:
           test -f pages-dist/index.html
           test -f pages-dist/index.pck
           test -f pages-dist/index.wasm
-
+          
       - name: Upload web release artifact
         uses: actions/upload-artifact@v4
         with:
