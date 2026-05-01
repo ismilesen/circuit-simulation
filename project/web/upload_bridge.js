@@ -2,16 +2,24 @@
  * upload_bridge.js
  *
  * Provides the two globals that upload_panel.gd expects on web builds:
- *   window.godotUploadQueue       – Array<{name, base64, error?}>
+ *   window.godotUploadQueue       – Array of queue items (see formats below)
  *   window.godotUploadOpenPicker() – opens the browser file picker
+ *
+ * Queue item formats (upload_panel.gd handles both):
+ *   Batch form (preferred — pushed by the file picker):
+ *     { type: "batch", files: [ { name, size, type, base64, error }, ... ] }
+ *   Legacy single-file form (pushed by drag-and-drop, one per file):
+ *     { name, base64, error? }
+ *
+ * The panel validates "at most 1 xchem (.sch/.sym) + at most 1 spice
+ * (.spice/.cir/.net/.txt) per upload" on the GDScript side, so this file
+ * only needs to deliver the bytes honestly.
  *
  * Include this script in the exported HTML BEFORE the Godot engine boots.
  * In Godot's Web export settings → HTML → "Head Include", add:
  *   <script src="upload_bridge.js"></script>
  *
  * Then copy this file into the same folder as the exported .html file.
- *
- * Drag-and-drop onto the Godot canvas is also supported automatically.
  */
 
 (function () {
@@ -20,20 +28,70 @@
   // Queue polled every frame by upload_panel.gd via JavaScriptBridge.eval().
   window.godotUploadQueue = [];
 
+  // File extensions the picker offers. Matches upload_panel.gd expectations
+  // plus workspace zips for Load Workspace.
+  var ACCEPT_EXTS = [
+    ".sch", ".sym",
+    ".spice", ".cir", ".net", ".txt",
+    ".zip", ".cvw.zip"
+  ];
+
+  // Encode bytes to base64 in chunks to avoid stack overflow on large files.
+  function _bytesToBase64(bytes) {
+    var CHUNK = 0x8000;
+    var binary = "";
+    for (var i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(binary);
+  }
+
+  // Read a File and return a {name, size, type, base64, error} entry.
+  function _fileToEntry(file) {
+    return file.arrayBuffer()
+      .then(function (buf) {
+        var bytes = new Uint8Array(buf);
+        return {
+          name: file.name,
+          size: file.size,
+          type: file.type || "",
+          base64: _bytesToBase64(bytes),
+          error: ""
+        };
+      })
+      .catch(function (err) {
+        return {
+          name: (file && file.name) || "unknown",
+          size: (file && file.size) || 0,
+          type: (file && file.type) || "",
+          base64: "",
+          error: String(err)
+        };
+      });
+  }
+
   // Called by upload_panel.gd when the user clicks the Upload button.
+  // Delivers the whole picker selection as ONE batch so the GDScript side
+  // can enforce "at most one xchem + at most one spice per upload" atomically.
   window.godotUploadOpenPicker = function () {
     var input = document.createElement("input");
     input.type = "file";
     input.multiple = true;
-    input.accept = ".sch,.spice,.cir,.net,.txt";
+    input.accept = ACCEPT_EXTS.join(",");
 
     input.addEventListener("change", function (e) {
       var files = Array.from(e.target.files || []);
-      files.forEach(_readAndQueue);
-      // Clean up the hidden input after use.
       if (input.parentNode) {
         input.parentNode.removeChild(input);
       }
+      if (files.length === 0) return;
+
+      Promise.all(files.map(_fileToEntry)).then(function (entries) {
+        window.godotUploadQueue.push({
+          type: "batch",
+          files: entries
+        });
+      });
     });
 
     // Must be in the DOM for some browsers to fire the change event.
@@ -42,39 +100,11 @@
     input.click();
   };
 
-  // Reads a File object and pushes {name, base64} onto the queue.
-  function _readAndQueue(file) {
-    var reader = new FileReader();
-
-    reader.onload = function (ev) {
-      var buffer = ev.target.result; // ArrayBuffer
-      var bytes = new Uint8Array(buffer);
-
-      // Convert to base64 in chunks to avoid stack overflow on large files.
-      var CHUNK = 8192;
-      var binary = "";
-      for (var i = 0; i < bytes.length; i += CHUNK) {
-        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
-      }
-      var b64 = btoa(binary);
-
-      window.godotUploadQueue.push({ name: file.name, base64: b64 });
-    };
-
-    reader.onerror = function () {
-      var msg = reader.error ? reader.error.message : "unknown error";
-      window.godotUploadQueue.push({ name: file.name, base64: "", error: msg });
-    };
-
-    reader.readAsArrayBuffer(file);
-  }
-
-  // Wire up drag-and-drop onto the Godot canvas once the page is ready.
+  // Drag-and-drop onto the Godot canvas: also deliver as a single batch so
+  // a user dropping one xchem + one spice together is treated as one project.
   function _setupDragDrop() {
-    // Godot 4 web export uses id="canvas" by default.
     var canvas = document.getElementById("canvas");
     if (!canvas) {
-      // Try again after a short delay in case Godot hasn't inserted the canvas yet.
       setTimeout(_setupDragDrop, 500);
       return;
     }
@@ -82,14 +112,21 @@
     canvas.addEventListener("dragover", function (e) {
       e.preventDefault();
       e.stopPropagation();
-      e.dataTransfer.dropEffect = "copy";
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
     });
 
     canvas.addEventListener("drop", function (e) {
       e.preventDefault();
       e.stopPropagation();
-      var files = Array.from(e.dataTransfer.files || []);
-      files.forEach(_readAndQueue);
+      var files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+      if (files.length === 0) return;
+
+      Promise.all(files.map(_fileToEntry)).then(function (entries) {
+        window.godotUploadQueue.push({
+          type: "batch",
+          files: entries
+        });
+      });
     });
   }
 
