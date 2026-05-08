@@ -1,7 +1,11 @@
 class_name VisSceneBuilder
 extends RefCounted
 
-## Untyped reference to the main SchVis3D Node3D (avoids circular class dependency).
+## Builds the 3-D scene from a parsed schematic.
+## After draw_circuit() completes, _vis._net_materials is populated with one
+## StandardMaterial3D per labeled net, ready for the simulation to update
+## their emission_energy_multiplier every 64 ngspice time-steps.
+
 var _vis
 
 
@@ -18,18 +22,10 @@ func draw_circuit(parser, floor: MeshInstance3D) -> void:
 			continue
 		child.queue_free()
 
-	# Reset all state that references freed nodes.
-	_vis._wire_cursors.clear()
-	_vis._transistor_materials.clear()
-	_vis._transistor_nodes.clear()
-	_vis._transistor_cursors.clear()
-	_vis._transistor_cursor_map.clear()
-	_vis._gate_cursors.clear()
-	_vis._gate_cursor_map.clear()
-	_vis._input_positions.clear()
-	_vis._net_cascade.clear()
-	_vis._net_was_done.clear()
-	_vis._seed_nets.clear()
+	# Reset simulation-facing state.
+	_vis._net_materials.clear()
+	_vis._net_index.clear()
+	_vis._time_index = -1
 
 	var split_wires: Array = VisGeomUtils.split_wires_at_junctions(Array(parser.wires))
 	_propagate_labels(split_wires, Array(parser.components))
@@ -40,7 +36,6 @@ func draw_circuit(parser, floor: MeshInstance3D) -> void:
 		draw_component(comp, parser)
 
 	build_net_lookup()
-	build_wire_graph()
 
 
 # ---------- Wires ----------
@@ -60,22 +55,14 @@ func draw_wire(wire: Dictionary) -> void:
 	mi.mesh = box
 
 	var wire_label: String = wire.get("label", "")
+	var net_key: String = ""
 	if wire_label != "":
-		mi.set_meta("sim_net", wire_label.to_lower().replace("#", ""))
+		net_key = wire_label.to_lower().replace("#", "")
+		mi.set_meta("sim_net", net_key)
 
-	var wire_shader: ShaderMaterial = null
-	if wire_label != "":
-		wire_shader = ShaderMaterial.new()
-		wire_shader.shader = _vis._WIRE_FILL_SHADER
-		wire_shader.set_shader_parameter("wire_length",   length)
-		wire_shader.set_shader_parameter("fill_fraction", 1.0)
-		wire_shader.set_shader_parameter("fill_from_p1",  1)
-		wire_shader.set_shader_parameter("color_behind",  Color.BLACK)
-		wire_shader.set_shader_parameter("color_ahead",   Color.BLACK)
-		wire_shader.set_shader_parameter("energy_behind", 0.0)
-		wire_shader.set_shader_parameter("energy_ahead",  0.0)
-		mi.material_override = wire_shader
-	else:
+	# Labeled wires use the shared net material (set by build_net_lookup).
+	# Unlabeled wires use the static wire material.
+	if wire_label == "":
 		mi.material_override = _vis._materials["wire"]
 
 	mi.position = (p1 + p2) / 2.0
@@ -96,35 +83,6 @@ func draw_wire(wire: Dictionary) -> void:
 		label.outline_size = 8
 		label.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 		_vis.add_child(label)
-
-		# Flow cursor sphere for this labeled wire segment.
-		var cursor := MeshInstance3D.new()
-		var sphere := SphereMesh.new()
-		sphere.radius = 0.022
-		sphere.height = 0.044
-		cursor.mesh = sphere
-		var cursor_mat := StandardMaterial3D.new()
-		cursor_mat.emission_enabled = true
-		cursor_mat.emission = Color.WHITE
-		cursor_mat.emission_energy_multiplier = 3.0
-		cursor.material_override = cursor_mat
-		cursor.visible = false
-		cursor.position = p1
-		_vis.add_child(cursor)
-		_vis._wire_cursors.append({
-			"cursor":      cursor,
-			"cursor_mat":  cursor_mat,
-			"wire_shader": wire_shader,
-			"p1":          p1,
-			"p2":          p2,
-			"net":         wire_label.to_lower().replace("#", ""),
-			"trigger_t":   -999.0,
-			"trigger_dir": 1.0,
-			"color_old":   Color.BLACK,
-			"color_new":   Color.BLACK,
-			"energy_old":  0.0,
-			"energy_new":  0.0,
-		})
 
 
 func draw_connection_dot(pos: Vector3) -> void:
@@ -151,11 +109,6 @@ func draw_component(comp: Dictionary, parser) -> void:
 	var mat_type: String = sym_def.type if sym_def.type != "" else type
 	var mat: StandardMaterial3D = VisMaterialFactory.get_material(_vis._materials, mat_type)
 
-	var comp_name: String = comp.get("name", "")
-	if (type == "pmos" or type == "nmos") and comp_name != "":
-		mat = mat.duplicate() as StandardMaterial3D
-		_vis._transistor_materials[comp_name] = mat
-
 	var symbol := CircuitSymbol.new()
 	symbol.setup(comp, sym_def, sf, mat)
 	symbol.position = pos
@@ -163,12 +116,6 @@ func draw_component(comp: Dictionary, parser) -> void:
 	if mirror:
 		symbol.scale.x = -1.0
 	_vis.add_child(symbol)
-
-	if comp_name != "" and (type == "pmos" or type == "nmos"):
-		_vis._transistor_nodes[comp_name] = symbol
-
-	if type == "ipin" or type == "input_pin":
-		_vis._input_positions.append(pos)
 
 	var comp_label: String = comp.get("label", "")
 	var label_text: String = comp_label if comp_label != "" else mat_type
@@ -184,13 +131,9 @@ func draw_component(comp: Dictionary, parser) -> void:
 	_vis.add_child(label)
 
 
-# ---------- Net Label Propagation ----------
+# ---------- Net label propagation ----------
 
-## Fixes wire labels that conflict with a lab_pin/ipin/opin component at the
-## same endpoint position.  Only seeds BFS from actual conflicts; schematics
-## with correct labels are untouched (function returns immediately).
 func _propagate_labels(wires: Array, components: Array) -> void:
-	# Collect label sources: "x,y" → net_name from placed label components.
 	var label_sources: Dictionary = {}
 	for comp: Dictionary in components:
 		var comp_label: String = comp.get("label", "")
@@ -204,7 +147,6 @@ func _propagate_labels(wires: Array, components: Array) -> void:
 	if label_sources.is_empty():
 		return
 
-	# Build endpoint map: "x,y" → Array of wire indices.
 	var ep_map: Dictionary = {}
 	for i: int in range(wires.size()):
 		var w: Dictionary = wires[i]
@@ -214,8 +156,6 @@ func _propagate_labels(wires: Array, components: Array) -> void:
 				ep_map[key] = []
 			(ep_map[key] as Array).append(i)
 
-	# Seed BFS ONLY where a wire's label conflicts with the lab_pin label at its endpoint.
-	# If all labels are already correct no seeds are added and we return early.
 	var wire_labels: Array = []
 	wire_labels.resize(wires.size())
 	wire_labels.fill("")
@@ -229,14 +169,13 @@ func _propagate_labels(wires: Array, components: Array) -> void:
 			if not label_sources.has(key):
 				continue
 			var src: String = str(label_sources[key])
-			if src != orig and wire_labels[i] == "":   # conflict detected
+			if src != orig and wire_labels[i] == "":
 				wire_labels[i] = src
 				queue.append(i)
 
 	if queue.is_empty():
-		return  # all labels consistent — nothing to fix
+		return
 
-	# BFS: spread the corrected label to connected wires that currently carry the wrong label.
 	var visited: Array = []
 	visited.resize(wires.size())
 	visited.fill(false)
@@ -255,7 +194,6 @@ func _propagate_labels(wires: Array, components: Array) -> void:
 				wire_labels[ni] = lbl
 				queue.append(ni)
 
-	# Apply corrections.
 	for i: int in range(wires.size()):
 		if wire_labels[i] != "":
 			wires[i]["label"] = wire_labels[i]
@@ -265,7 +203,7 @@ func _coord_key(x: float, y: float) -> String:
 	return str(roundi(x)) + "," + str(roundi(y))
 
 
-# ---------- Symbol Resolution ----------
+# ---------- Symbol resolution ----------
 
 func get_sym_def(symbol_name: String) -> SymbolDefinition:
 	var sym_cache: Dictionary = _vis._sym_cache
@@ -330,33 +268,26 @@ func find_sym_recursive(base_path: String, filename: String) -> String:
 	return ""
 
 
-# ---------- Net & Wire Graph ----------
+# ---------- Net lookup ----------
 
-## Rebuilds the net-name → mesh list and assigns unique materials per net.
+## Builds _net_materials: one StandardMaterial3D per labeled net.
+## The material starts dark; the visualizer updates emission_energy_multiplier
+## each time a simulation_data_ready sample arrives.
 func build_net_lookup() -> void:
-	_vis._net_nodes.clear()
 	_vis._net_materials.clear()
-	_vis._anim_active = false
 	for child in _vis.get_children():
 		if not (child is MeshInstance3D):
 			continue
 		if not child.has_meta("sim_net"):
 			continue
 		var net: String = str(child.get_meta("sim_net"))
-		if not _vis._net_nodes.has(net):
-			_vis._net_nodes[net] = []
-			# Neutral gray until simulation data arrives; unmatched wires stay dark.
+		if not _vis._net_materials.has(net):
 			var mat := StandardMaterial3D.new()
 			mat.albedo_color = Color(0.9, 0.9, 0.9)
 			mat.emission_enabled = true
-			mat.emission = Color(0.0, 0.0, 0.0)
+			mat.emission = Color(1.0, 0.95, 0.3)
 			mat.emission_energy_multiplier = 0.0
 			_vis._net_materials[net] = mat
-		_vis._net_nodes[net].append(child)
-		# Labeled wires already carry a ShaderMaterial; don't overwrite.
-		if not (child.material_override is ShaderMaterial):
-			(child as MeshInstance3D).material_override = _vis._net_materials[net]
+		(child as MeshInstance3D).material_override = _vis._net_materials[net]
 
-
-func build_wire_graph() -> void:
-	_vis._net_cascade = WireGraph.build(_vis._wire_cursors, _vis._input_positions, _vis.scale_factor)
+	print("VisSceneBuilder: %d labeled nets registered." % _vis._net_materials.size())

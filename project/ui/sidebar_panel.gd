@@ -14,7 +14,6 @@ var _panel_visible: bool = true
 
 
 func _ready() -> void:
-	# Set up this container to span the left side of the screen
 	anchor_left = 0.0
 	anchor_top = 0.0
 	anchor_right = 0.0

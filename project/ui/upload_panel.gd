@@ -45,17 +45,14 @@ var XSCHEM_EXTS: PackedStringArray = PackedStringArray(["sch", "sym"])
 # -------------------------------------------------------------------
 var projects: Array[Dictionary] = []
 
-# Targeted slot upload state (set when a card's "+" is clicked)
 var _pending_slot_project: int = -1
 var _pending_slot_key: String = ""
-
-# Which card is selected for Run Simulation
 var _selected_project: int = -1
 var _dark_mode: bool = false
 var _last_status_msg: String = "idle"
 var _last_status_tone: StatusTone = StatusTone.IDLE
 
-var _sim_signal_connected: bool = false
+## Reference to the CircuitSimulator node (resolved lazily).
 var _sim: Node = null
 
 # Theme / style vars
@@ -135,7 +132,6 @@ func _process(_delta: float) -> void:
 # -------------------------------------------------------------------
 
 func _on_upload_pressed() -> void:
-	# Top-level upload clears any pending slot target
 	_pending_slot_project = -1
 	_pending_slot_key = ""
 	if OS.has_feature("web"):
@@ -168,7 +164,6 @@ func _on_native_files_selected(paths: PackedStringArray) -> void:
 		elif NETLIST_EXTS.has(ext):
 			spice_paths.append(p)
 
-	# When doing a targeted slot upload only one file is expected
 	if _pending_slot_project >= 0:
 		if paths.size() > 1:
 			_set_error("Select exactly one file when filling a project slot.")
@@ -265,7 +260,6 @@ func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
 # -------------------------------------------------------------------
 
 func _assign_spice(slot: Dictionary) -> void:
-	# Every spice upload creates a new project keyed by its basename.
 	var basename := (slot["display"] as String).get_basename()
 	projects.append({
 		"name": basename,
@@ -276,14 +270,12 @@ func _assign_spice(slot: Dictionary) -> void:
 	spice_paired.emit(str(slot.get("user_path", "")))
 
 func _assign_xschem(slot: Dictionary) -> void:
-	# Pair with the first incomplete project that has no xschem yet.
 	for proj in projects:
 		if proj["xschem"] == null:
 			proj["xschem"] = slot
 			proj["complete"] = proj["spice"] != null
 			schematic_requested.emit(str(slot.get("user_path", "")))
 			return
-	# No waiting project — create orphan (name updated when spice arrives)
 	var basename := (slot["display"] as String).get_basename()
 	projects.append({
 		"name": basename,
@@ -300,7 +292,6 @@ func _assign_to_pending_slot(slot: Dictionary) -> void:
 	_pending_slot_key = ""
 
 	if idx < 0 or idx >= projects.size():
-		# Index out of range — fall back to auto-assign
 		var ext := str(slot.get("ext", ""))
 		if XSCHEM_EXTS.has(ext):
 			_assign_xschem(slot)
@@ -391,7 +382,6 @@ func _handle_web_batch(items: Array) -> void:
 			spice_count += 1
 		entries.append({"name": filename, "bytes": bytes})
 
-	# Skip batch-size validation for targeted slot uploads
 	if _pending_slot_project < 0:
 		if xschem_count > 1:
 			_set_error("Please select at most one xschem file (.sch/.sym) per upload.")
@@ -435,15 +425,15 @@ func _on_run_pressed() -> void:
 		return
 
 	if OS.has_feature("web"):
-		_set_error("Web build: ngspice runtime is not supported yet.")
+		_set_error("Web build: ngspice runtime is not supported.")
 		return
 
 	_sim = _resolve_simulator()
 	if _sim == null:
 		_set_error("Could not find CircuitSimulator node.")
 		return
-	if not _sim.has_method("initialize_ngspice"):
-		_set_error("Resolved node lacks initialize_ngspice().")
+	if not _sim.has_method("run_continuous"):
+		_set_error("Resolved node lacks run_continuous().")
 		return
 
 	var selected_proj: Dictionary
@@ -456,20 +446,18 @@ func _on_run_pressed() -> void:
 		return
 
 	var spice_entry: Dictionary = selected_proj["spice"]
-	if not _sim_signal_connected and _sim.has_signal("simulation_finished"):
-		_sim.connect("simulation_finished", Callable(self, "_on_sim_finished"))
-		_sim_signal_connected = true
+	var os_path := ProjectSettings.globalize_path(str(spice_entry["user_path"]))
 
-	_refresh_status("initializing ngspice...", StatusTone.WARN)
-	if not bool(_sim.call("initialize_ngspice")):
-		_set_error("initialize_ngspice() returned false.")
+	_refresh_status("starting simulation...", StatusTone.WARN)
+
+	# Single call: C++ handles initialization, netlist loading, and bg_run.
+	var ok: bool = bool(_sim.call("run_continuous", os_path))
+	if not ok:
+		_set_error("run_continuous() failed.")
 		return
 
-	_refresh_status("loading netlist...", StatusTone.WARN)
-	var os_path := ProjectSettings.globalize_path(str(spice_entry["user_path"]))
-	_sim.call("load_netlist", os_path)
-	_refresh_status("running simulation...", StatusTone.WARN)
-	_sim.call("run_simulation")
+	_refresh_status("simulation running", StatusTone.OK)
+	_log("[color=darkgreen][b]OK:[/b][/color] Continuous simulation started.")
 
 func _on_sim_finished() -> void:
 	_refresh_status("simulation finished", StatusTone.OK)
@@ -493,10 +481,8 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 	card.add_theme_stylebox_override("panel", normal_style)
 	card.mouse_filter = Control.MOUSE_FILTER_STOP
 
-	# Use .bind() — more reliable than a lambda for signal/idx capture
 	card.gui_input.connect(_on_card_gui_input.bind(idx))
 
-	# Hover: swap stylebox directly (no rebuild needed)
 	card.mouse_entered.connect(func():
 		if idx != _selected_project:
 			card.add_theme_stylebox_override("panel", _sb_card_hover.duplicate())
@@ -515,7 +501,6 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 	var col_secondary: Color = Color("8A8880") if _dark_mode else Color("606060")
 	var col_mid: Color       = Color("9A9890") if _dark_mode else Color("404040")
 
-	# Title label
 	var title_lbl := Label.new()
 	title_lbl.text = "%s:" % str(proj["name"])
 	title_lbl.add_theme_color_override("font_color", col_primary)
@@ -523,7 +508,6 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 	title_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(title_lbl)
 
-	# Spice slot
 	hbox.add_child(_build_slot_control(idx, "spice", proj["spice"]))
 
 	var spice_ext_lbl := Label.new()
@@ -540,7 +524,6 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 	and_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(and_lbl)
 
-	# Xschem slot
 	hbox.add_child(_build_slot_control(idx, "xschem", proj["xschem"]))
 
 	var sch_ext := ".sch"
@@ -553,13 +536,11 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 	xschem_ext_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(xschem_ext_lbl)
 
-	# Spacer
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(spacer)
 
-	# Size label
 	var total_bytes := 0
 	if proj["spice"] != null:
 		total_bytes += int((proj["spice"] as Dictionary).get("bytes", 0))
@@ -576,7 +557,6 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 
 func _build_slot_control(proj_idx: int, slot_key: String, slot_data: Variant) -> Control:
 	if slot_data != null:
-		# File present — show basename in a styled box, transparent to mouse
 		var container := PanelContainer.new()
 		container.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		container.add_theme_stylebox_override("panel", _sb_slot_box.duplicate())
@@ -588,7 +568,6 @@ func _build_slot_control(proj_idx: int, slot_key: String, slot_data: Variant) ->
 		container.add_child(lbl)
 		return container
 	else:
-		# File missing — show "+" upload button
 		var btn := Button.new()
 		btn.text = "  +  "
 		btn.add_theme_stylebox_override("normal", _sb_slot_box.duplicate())
@@ -605,7 +584,6 @@ func _on_card_gui_input(event: InputEvent, idx: int) -> void:
 		var mb := event as InputEventMouseButton
 		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
 			_selected_project = idx
-			# Deferred so we don't free this card node while still inside its signal
 			_rebuild_cards.call_deferred()
 
 func _on_slot_plus_pressed(proj_idx: int, slot_key: String) -> void:
@@ -904,7 +882,6 @@ func _load_workspace_zip_from_path(path: String) -> void:
 			projects.append(new_proj)
 		reader.close()
 	else:
-		# Legacy v1: flat items[]
 		var items_var: Variant = m.get("items", [])
 		if typeof(items_var) != TYPE_ARRAY:
 			reader.close()
@@ -946,17 +923,17 @@ func _load_workspace_zip_from_bytes(bytes: PackedByteArray) -> bool:
 func _resolve_simulator() -> Node:
 	if simulator_path != NodePath("") and has_node(simulator_path):
 		var n0: Node = get_node(simulator_path)
-		if n0 != null and n0.has_method("initialize_ngspice"):
+		if n0 != null and n0.has_method("run_continuous"):
 			return n0
 	var cur: Node = self
 	while cur != null:
-		if cur.has_method("initialize_ngspice") and cur.has_method("load_netlist") and cur.has_method("run_simulation"):
+		if cur.has_method("run_continuous"):
 			return cur
 		cur = cur.get_parent()
 	var root: Window = get_tree().root
 	if root != null:
 		for c in root.find_children("*", "", true, false):
-			if c is Node and (c as Node).has_method("initialize_ngspice") and (c as Node).has_method("load_netlist"):
+			if c is Node and (c as Node).has_method("run_continuous"):
 				return c as Node
 	return null
 
@@ -1018,7 +995,7 @@ func _refresh_status(msg: String, tone: StatusTone = StatusTone.IDLE) -> void:
 			StatusTone.OK:    c = Color("50CC70")
 			StatusTone.WARN:  c = Color("D4A030")
 			StatusTone.ERROR: c = Color("E05040")
-			_:                c = Color("C0BDB6")   # light warm grey, readable on dark
+			_:                c = Color("C0BDB6")
 	else:
 		match tone:
 			StatusTone.OK:    c = Color(0.10, 0.55, 0.20)
@@ -1072,8 +1049,6 @@ func _on_theme_toggle_pressed() -> void:
 	_refresh_status(_last_status_msg, _last_status_tone)
 	dark_mode_changed.emit(_dark_mode)
 
-
-## Public accessor so other panels can sync to the current theme on startup.
 func is_dark_mode() -> bool:
 	return _dark_mode
 
@@ -1084,7 +1059,6 @@ func is_dark_mode() -> bool:
 func _apply_theme() -> void:
 	_t = Theme.new()
 
-	# --- Palette: light (XP Luna) or dark ---
 	var xp_face: Color
 	var xp_white: Color
 	var xp_text: Color
@@ -1136,12 +1110,10 @@ func _apply_theme() -> void:
 		xp_ctrl_shadow       = Color("404D5B")
 		theme_toggle_button.text = "Dark Theme"
 
-	# Root background
 	var sb_root := StyleBoxFlat.new()
 	sb_root.bg_color = xp_face
 	add_theme_stylebox_override("panel", sb_root)
 
-	# Generic panel
 	_sb_panel = StyleBoxFlat.new()
 	_sb_panel.bg_color = xp_face
 	_sb_panel.border_color = xp_ctrl_border
@@ -1157,7 +1129,6 @@ func _apply_theme() -> void:
 	_sb_panel_hover = _sb_panel.duplicate() as StyleBoxFlat
 	_sb_panel_hover.border_color = xp_sel_blue
 
-	# Drop zone
 	_sb_drop_idle = _sb_panel.duplicate() as StyleBoxFlat
 	_sb_drop_idle.bg_color = Color("1A2530") if _dark_mode else Color("EBF3FC")
 	_sb_drop_idle.border_color = xp_ctrl_border
@@ -1166,7 +1137,6 @@ func _apply_theme() -> void:
 	_sb_drop_flash.bg_color = Color("2A2010") if _dark_mode else Color("FFF6D4")
 	_sb_drop_flash.border_color = xp_btn_hover_border
 
-	# Project card styles
 	_sb_card = StyleBoxFlat.new()
 	_sb_card.bg_color = xp_white
 	_sb_card.border_color = xp_ctrl_border
@@ -1188,10 +1158,9 @@ func _apply_theme() -> void:
 	_sb_card_selected.border_width_bottom = 1
 
 	_sb_card_hover = _sb_card.duplicate() as StyleBoxFlat
-	_sb_card_hover.bg_color = xp_btn_hover_face   # FFECC6 — matches button hover
+	_sb_card_hover.bg_color = xp_btn_hover_face
 	_sb_card_hover.border_color = xp_btn_hover_border
 
-	# Slot box (filename / + button inside cards)
 	_sb_slot_box = StyleBoxFlat.new()
 	_sb_slot_box.bg_color = xp_white
 	_sb_slot_box.border_color = xp_ctrl_border
@@ -1208,7 +1177,6 @@ func _apply_theme() -> void:
 	_sb_slot_box_hover.bg_color = xp_btn_hover_face
 	_sb_slot_box_hover.border_color = xp_btn_hover_border
 
-	# Buttons
 	var sb_btn := StyleBoxFlat.new()
 	sb_btn.bg_color = xp_btn_face
 	sb_btn.border_color = xp_ctrl_border
@@ -1254,7 +1222,6 @@ func _apply_theme() -> void:
 	_t.set_color("font_pressed_color", "Button", xp_text)
 	_t.set_color("font_focus_color", "Button", xp_text)
 
-	# LineEdit
 	var sb_edit := StyleBoxFlat.new()
 	sb_edit.bg_color = xp_white
 	sb_edit.border_color = xp_ctrl_border
@@ -1271,7 +1238,6 @@ func _apply_theme() -> void:
 	sb_edit_focus.border_color = xp_sel_blue
 	_t.set_stylebox("focus", "LineEdit", sb_edit_focus)
 
-	# RichTextLabel (output box)
 	var sb_rtl := StyleBoxFlat.new()
 	sb_rtl.bg_color = xp_white
 	sb_rtl.border_color = xp_ctrl_border
@@ -1285,14 +1251,12 @@ func _apply_theme() -> void:
 	sb_rtl.content_margin_bottom = 4
 	_t.set_stylebox("normal", "RichTextLabel", sb_rtl)
 
-	# Labels
 	_t.set_color("font_color", "Label", xp_text)
 	_t.set_color("font_color", "LineEdit", xp_text)
 	_t.set_stylebox("panel", "PanelContainer", _sb_panel)
 
 	theme = _t
 
-	# Per-node overrides
 	var header: Label = $Margin/VBox/Header
 	if header != null:
 		header.add_theme_color_override("font_color", xp_title_blue)
@@ -1304,7 +1268,6 @@ func _apply_theme() -> void:
 	drop_title.add_theme_color_override("font_color", xp_title_blue)
 	drop_zone.add_theme_stylebox_override("panel", _sb_drop_idle)
 
-	# Status bar
 	_sb_status_bar = StyleBoxFlat.new()
 	_sb_status_bar.bg_color = xp_face
 	_sb_status_bar.border_color = xp_ctrl_shadow
@@ -1319,7 +1282,6 @@ func _apply_theme() -> void:
 	if status_bar != null:
 		status_bar.add_theme_stylebox_override("panel", _sb_status_bar)
 
-	# Output box text colour follows the theme
 	if output_box != null:
 		output_box.add_theme_color_override("default_color", xp_text)
 

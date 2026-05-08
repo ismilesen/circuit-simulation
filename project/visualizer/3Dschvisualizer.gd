@@ -1,25 +1,16 @@
 extends Node3D
 
-## Preloaded once at class level so every wire shares the same Shader object.
-const _WIRE_FILL_SHADER = preload("res://visualizer/wire_fill.gdshader")
+## Main orchestrator. Responsibilities:
+##   1. Parse + render the .sch schematic.
+##   2. On spice_paired signal: call sim.run_continuous(path).
+##   3. On signal_names_ready: build net→column-index map.
+##   4. On simulation_data_ready: update wire emission brightness live.
+
 const _SIM_SCRIPT_PATH := "res://simulator/circuit_simulator.gd"
 
 @export var scale_factor: float = 0.01
 
-## Real seconds over which the full simulation period plays back (loop).
-@export var anim_playback_duration: float = 5.0
-
-## Real seconds it takes for a flow cursor to travel one wire segment.
-@export var cursor_traverse_seconds: float = 1.5
-
-## Minimum |ΔV| / Vmax that triggers a cursor (lower = more sensitive).
-@export var dv_anim_threshold: float = 0.04
-
-var parser: SchParser
-var _sidebar: SidebarPanel = null
-var _floor: MeshInstance3D = null
-
-# ---------- Shared state (read/written by helper scripts) ----------
+# ---------- Shared state (read by helper scripts) ----------
 
 ## Symbol definition cache: symbol_name → SymbolDefinition.
 var _sym_cache: Dictionary = {}
@@ -35,115 +26,61 @@ var _sym_search_paths: Array[String] = [
 	"res://symbols/sky130_fd_pr/",
 ]
 
-## net_label_lower → Array[MeshInstance3D]
-var _net_nodes: Dictionary = {}
-## net_label_lower → StandardMaterial3D
+## net_label_lower → StandardMaterial3D  (labeled wires only)
 var _net_materials: Dictionary = {}
 
-var _sim_time: Array = []
-var _sim_vectors: Dictionary = {}   # normalized_name → Array[float]
-var _anim_active: bool = false
-var _anim_sim_elapsed: float = 0.0
-var _real_elapsed: float = 0.0      # monotonic real-time counter
+# ---------- Simulation state ----------
 
-## Wire flow cursors: one per labeled segment.
-var _wire_cursors: Array[Dictionary] = []
+## net_label_lower → column index in each sample from simulation_data_ready.
+var _net_index: Dictionary = {}
 
-## Transistor connectivity from paired SPICE: comp_name → {d,g,s,b,type}.
-var _transistor_data: Dictionary = {}
-## Per-transistor duplicated material for independent conductance animation.
-var _transistor_materials: Dictionary = {}
-## CircuitSymbol nodes keyed by comp_name for pin position lookup.
-var _transistor_nodes: Dictionary = {}
+## Column index of the "time" vector (-1 = not found).
+var _time_index: int = -1
 
-## Channel cursors: one per transistor, travels D→S through the body.
-var _transistor_cursors: Array[Dictionary] = []
-var _transistor_cursor_map: Dictionary = {}   # comp_name → index
+# ---------- References ----------
+var _sim: Node = null
+var _sidebar: SidebarPanel = null
+var _floor: MeshInstance3D = null
+var _scene_builder: VisSceneBuilder
 
-## Gate cursors + flash/fill: one per transistor.
-var _gate_cursors: Array[Dictionary] = []
-var _gate_cursor_map: Dictionary = {}
-
-## World positions of input-pin components for cascade BFS seeding.
-var _input_positions: Array[Vector3] = []
-
-## Per-net cascade state: net_label → {trigger_t, max_hop, color_old/new, energy_old/new}.
-var _net_cascade: Dictionary = {}
-
-## gate_net (lower) → Array[String] comp_names whose gate is that net.
-var _gate_to_transistors: Dictionary = {}
-## upstream_net → Array[String] comp_names whose inlet (D) is that net.
-var _upstream_to_transistors: Dictionary = {}
-
-## Edge-detection trackers (true = was idle last frame).
-var _net_was_done: Dictionary = {}
-var _tc_was_done: Array[bool] = []
-var _gc_was_done: Array[bool] = []
-
-## Nets directly reachable from input pins through wire connections (hop_dist < 999).
-## Only these nets self-trigger their cascades from voltage-transition detection.
-## All other nets (behind transistors) are triggered only via cascade_net_from_pin.
-var _seed_nets: Dictionary = {}
-
-# ---------- Helper instances ----------
-var _scene_builder:  VisSceneBuilder
-var _cursor_builder: VisCursorBuilder
-var _anim_player:    VisAnimPlayer
+# Voltage scale (sky130 VDD)
+const VMAX: float = 1.8
 
 
 func _ready() -> void:
-	parser = SchParser.new()
 	_materials = VisMaterialFactory.build_materials()
 	_floor = VisMaterialFactory.create_floor(self)
-	_scene_builder  = VisSceneBuilder.new(self)
-	_cursor_builder = VisCursorBuilder.new(self)
-	_anim_player    = VisAnimPlayer.new(self)
-	_setup_upload_ui()
-
-
-func _process(delta: float) -> void:
-	_anim_player.process_frame(delta)
+	_scene_builder = VisSceneBuilder.new(self)
+	_setup_ui()
 
 
 # ---------- Schematic loading ----------
 
 func load_schematic(path: String) -> bool:
+	var parser := SchParser.new()
 	if not parser.parse_file(path):
 		push_error("Failed to parse: " + path)
 		return false
-
 	_scene_builder.draw_circuit(parser, _floor)
-
-	var type_counts: Dictionary = {}
-	for comp in parser.components:
-		var t: String = comp.get("type", "unknown")
-		type_counts[t] = type_counts.get(t, 0) + 1
-	print("=== Loaded: %s ===" % path)
-	print("  Components: %d" % parser.components.size())
-	for t in type_counts:
-		print("    %s: %d" % [t, type_counts[t]])
-	print("  Wires: %d" % parser.wires.size())
-	print("  Scene nodes: %d" % get_child_count())
-
+	print("Loaded schematic: %s  (%d components, %d wires)" % [
+		path, parser.components.size(), parser.wires.size()])
 	return true
 
 
 # ---------- UI setup ----------
 
-func _setup_upload_ui() -> void:
-	var sim_script := load(_SIM_SCRIPT_PATH)
-	if sim_script is Script:
-		var sim_obj: Variant = (sim_script as Script).new()
-		if sim_obj is Node:
-			var sim_node: Node = sim_obj
-			sim_node.name = "CircuitSimulator"
-			if sim_node.has_signal("simulation_finished"):
-				sim_node.connect("simulation_finished", Callable(self, "_on_simulation_finished"))
-			get_parent().add_child.call_deferred(sim_node)
-		else:
-			push_warning("Could not instantiate %s — simulation will be unavailable." % _SIM_SCRIPT_PATH)
-	else:
-		push_warning("Could not load %s — simulation will be unavailable." % _SIM_SCRIPT_PATH)
+func _setup_ui() -> void:
+	# Locate or instantiate the simulator node.
+	_sim = _find_or_create_sim()
+	if _sim != null:
+		if _sim.has_signal("signal_names_ready"):
+			_sim.connect("signal_names_ready", Callable(self, "_on_signal_names_ready"))
+		if _sim.has_signal("simulation_data_ready"):
+			_sim.connect("simulation_data_ready", Callable(self, "_on_simulation_data_ready"))
+		if _sim.has_signal("simulation_started"):
+			_sim.connect("simulation_started", Callable(self, "_on_simulation_started"))
+		if _sim.has_signal("simulation_finished"):
+			_sim.connect("simulation_finished", Callable(self, "_on_simulation_finished"))
 
 	_sidebar = SidebarPanel.new()
 	_sidebar.name = "Sidebar"
@@ -157,72 +94,91 @@ func _setup_upload_ui() -> void:
 	ui_layer.add_child(_sidebar)
 
 
+func _find_or_create_sim() -> Node:
+	# 1. Search the existing tree.
+	for c: Node in get_tree().root.find_children("*", "", true, false):
+		if c.has_method("run_continuous"):
+			return c
+	# 2. Instantiate from GDScript (safe; does not re-register the GDExtension class).
+	var script: Resource = load(_SIM_SCRIPT_PATH)
+	if script is GDScript:
+		var obj: Variant = (script as GDScript).new()
+		if obj is Node:
+			var node: Node = obj as Node
+			node.name = "CircuitSimulator"
+			get_parent().add_child.call_deferred(node)
+			return node
+	push_warning("Visualizer: could not find or create CircuitSimulator — simulation unavailable.")
+	return null
+
+
 # ---------- Signal handlers ----------
 
 func _on_schematic_requested(path: String) -> void:
-	print("Loading schematic from UI: " + path)
 	load_schematic(path)
 
 
 func _on_spice_paired(path: String) -> void:
-	_transistor_data = VisGeomUtils.parse_spice_transistors(path)
-	print("Visualizer: paired SPICE — %d transistors mapped for conductance animation" % _transistor_data.size())
-	_cursor_builder.build_transistor_cursors()
+	if _sim == null:
+		push_warning("Visualizer: no simulator node — cannot run simulation.")
+		return
+	if not _sim.has_method("run_continuous"):
+		push_warning("Visualizer: simulator lacks run_continuous().")
+		return
+	# Reset index map; it will be rebuilt when signal_names_ready fires.
+	_net_index.clear()
+	_time_index = -1
+	_reset_wire_brightness()
+	print("Visualizer: starting continuous simulation for: " + path)
+	var ok: bool = _sim.call("run_continuous", path)
+	if not ok:
+		push_error("Visualizer: run_continuous() failed.")
 
-	# Gate net map: straight-forward from SPICE.
-	_gate_to_transistors.clear()
-	for comp_name: String in _transistor_data.keys():
-		var gate_net: String = str(_transistor_data[comp_name]["g"])
-		if not _gate_to_transistors.has(gate_net):
-			_gate_to_transistors[gate_net] = []
-		(_gate_to_transistors[gate_net] as Array).append(comp_name)
 
-	# Upstream net map: built from from_spice_pin stored in each cursor, because
-	# layout SPICE can swap D and S vs. schematic convention.  This ensures that
-	# when an internal node cascade finishes, the next transistor in the current
-	# path (whose supply side sits at that node) is triggered correctly.
-	_upstream_to_transistors.clear()
-	for tc: Dictionary in _transistor_cursors:
-		var cn: String = str(tc["comp_name"])
-		if not _transistor_data.has(cn):
-			continue
-		var from_pin: String    = str(tc.get("from_spice_pin", "s"))
-		var source_net: String  = str(_transistor_data[cn][from_pin])
-		if not _upstream_to_transistors.has(source_net):
-			_upstream_to_transistors[source_net] = []
-		(_upstream_to_transistors[source_net] as Array).append(cn)
-
-	print("Visualizer: %d gate nets, %d upstream nets wired for cascade" % [
-		_gate_to_transistors.size(), _upstream_to_transistors.size()])
+func _on_simulation_started() -> void:
+	print("Visualizer: simulation running.")
 
 
 func _on_simulation_finished() -> void:
-	print("Simulation finished — fetching vectors for animation...")
-	var sim: Node = get_tree().root.find_child("CircuitSimulator", true, false)
-	if sim == null:
-		push_warning("Visualizer: CircuitSimulator not found after simulation_finished")
-		return
+	print("Visualizer: simulation stopped.")
 
-	if not sim.has_method("get_continuous_memory_signal_names") or not sim.has_method("get_continuous_memory_snapshot"):
-		push_warning("Visualizer: simulator does not expose continuous memory snapshot methods")
-		return
 
-	var names: PackedStringArray = sim.call("get_continuous_memory_signal_names")
-	var snapshot: Array = sim.call("get_continuous_memory_snapshot")
-	print("Visualizer: buffer has %d signal names, %d samples" % [names.size(), snapshot.size()])
-	if names.size() > 0:
-		print("Visualizer: signal names = ", Array(names))
-
-	if names.is_empty() or snapshot.is_empty():
-		push_warning("Visualizer: simulation_finished but no buffered vectors available")
-		return
-
-	var all_vecs: Dictionary = {}
+## Receives the ordered vector-name list emitted once before the first data point.
+## Builds the net_label → column-index map used by _on_simulation_data_ready.
+func _on_signal_names_ready(names: PackedStringArray) -> void:
+	_net_index.clear()
+	_time_index = -1
+	print("Visualizer: received %d signal names." % names.size())
 	for i: int in range(names.size()):
-		var col: Array = []
-		col.resize(snapshot.size())
-		for s: int in range(snapshot.size()):
-			var row: PackedFloat64Array = snapshot[s]
-			col[s] = float(row[i]) if i < row.size() else 0.0
-		all_vecs[str(names[i])] = col
-	_anim_player.load_sim_data(all_vecs)
+		var raw: String = str(names[i])
+		var norm: String = VisGeomUtils.normalize_vec_name(raw)
+		if norm == "time":
+			_time_index = i
+		else:
+			_net_index[norm] = i
+	print("Visualizer: mapped %d nets. time_index=%d" % [_net_index.size(), _time_index])
+
+
+## Called every 64 ngspice time-steps with a flat sample array.
+## Updates each labeled wire's emission brightness proportional to voltage (0–1.8 V).
+func _on_simulation_data_ready(sample: PackedFloat64Array) -> void:
+	for net: String in _net_index.keys():
+		if not _net_materials.has(net):
+			continue
+		var col: int = int(_net_index[net])
+		if col >= sample.size():
+			continue
+		var voltage: float = float(sample[col])
+		var t: float = clamp(voltage / VMAX, 0.0, 1.0)
+		var mat: StandardMaterial3D = _net_materials[net]
+		# Emission color: warm yellow, brightness scaled 0 → full.
+		mat.emission = Color(1.0, 0.95, 0.3)
+		mat.emission_energy_multiplier = 0.05 + t * 2.5
+
+
+# ---------- Helpers ----------
+
+## Resets all labeled wires to dark (no emission) before a new simulation run.
+func _reset_wire_brightness() -> void:
+	for mat: StandardMaterial3D in _net_materials.values():
+		mat.emission_energy_multiplier = 0.0
