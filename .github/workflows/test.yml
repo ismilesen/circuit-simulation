@@ -167,9 +167,11 @@ jobs:
           set -euo pipefail
           test -f project/build/web/release/upload_bridge.js
           test -f project/build/web/release/server.js
+          test -f project/build/web/release/index.service.worker.js
           test -f project/build/web/release/libngspice.so
           test -f project/build/web/release/ngspice/libngspice.so
           grep -Eq 'libngspice\.so' project/build/web/release/index.html
+          grep -Eq '"serviceWorker":"index\.service\.worker\.js"' project/build/web/release/index.html
           grep -Eq 'const GODOT_THREADS_ENABLED = true;' project/build/web/release/index.html
           if find project/build/web/release -maxdepth 1 -type f -name 'libcircuit_sim.web.*.nothreads.wasm' | grep -q .; then
             echo "ERROR: web export contains stale .nothreads wasm artifacts"
