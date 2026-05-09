@@ -2,7 +2,7 @@ extends Node3D
 
 ## Main orchestrator. Responsibilities:
 ##   1. Parse + render the .sch schematic.
-##   2. On spice_paired signal: call sim.run_continuous(path).
+##   2. On spice_paired signal: remember that a netlist is staged.
 ##   3. On signal_names_ready: build net→column-index map.
 ##   4. On simulation_data_ready: update wire emission brightness live.
 
@@ -119,23 +119,14 @@ func _on_schematic_requested(path: String) -> void:
 
 
 func _on_spice_paired(path: String) -> void:
-	if _sim == null:
-		push_warning("Visualizer: no simulator node — cannot run simulation.")
-		return
-	if not _sim.has_method("run_continuous"):
-		push_warning("Visualizer: simulator lacks run_continuous().")
-		return
+	print("Visualizer: netlist staged, waiting for Run Simulation: " + path)
+
+
+func _on_simulation_started() -> void:
 	# Reset index map; it will be rebuilt when signal_names_ready fires.
 	_net_index.clear()
 	_time_index = -1
 	_reset_wire_brightness()
-	print("Visualizer: starting continuous simulation for: " + path)
-	var ok: bool = _sim.call("run_continuous", path)
-	if not ok:
-		push_error("Visualizer: run_continuous() failed.")
-
-
-func _on_simulation_started() -> void:
 	print("Visualizer: simulation running.")
 
 
@@ -148,6 +139,7 @@ func _on_simulation_finished() -> void:
 func _on_signal_names_ready(names: PackedStringArray) -> void:
 	_net_index.clear()
 	_time_index = -1
+	_reset_wire_brightness()
 	print("Visualizer: received %d signal names." % names.size())
 	for i: int in range(names.size()):
 		var raw: String = str(names[i])
@@ -159,7 +151,7 @@ func _on_signal_names_ready(names: PackedStringArray) -> void:
 	print("Visualizer: mapped %d nets. time_index=%d" % [_net_index.size(), _time_index])
 
 
-## Called every 64 ngspice time-steps with a flat sample array.
+## Called periodically from CircuitSimulator with a flat sample array.
 ## Updates each labeled wire's emission brightness proportional to voltage (0–1.8 V).
 func _on_simulation_data_ready(sample: PackedFloat64Array) -> void:
 	for net: String in _net_index.keys():

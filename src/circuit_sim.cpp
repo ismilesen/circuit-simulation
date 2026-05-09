@@ -1,5 +1,6 @@
 #include "circuit_sim.h"
 
+#include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -29,6 +30,8 @@ using namespace godot;
 // ─── File / string utilities ────────────────────────────────────────────────
 
 namespace {
+
+constexpr int64_t SIMULATION_DATA_EMIT_STRIDE = 512;
 
 std::string to_lower_copy(const std::string &s) {
     std::string out = s;
@@ -95,6 +98,25 @@ std::vector<std::string> to_logical_lines(const std::vector<std::string> &physic
     return out;
 }
 
+void split_text_lines(const std::string &text, std::vector<std::string> &out) {
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        out.push_back(line);
+    }
+}
+
+bool read_godot_file_lines(const String &path, std::vector<std::string> &out) {
+    Ref<FileAccess> file = FileAccess::open(path, FileAccess::READ);
+    if (file.is_null() || !file->is_open()) return false;
+
+    String text = file->get_as_text();
+    CharString utf8 = text.utf8();
+    split_text_lines(std::string(utf8.get_data()), out);
+    return true;
+}
+
 #ifndef __EMSCRIPTEN__
 // Desktop: full filesystem path resolution via std::filesystem.
 std::string resolve_path_token(const std::string &raw, const fs::path &base_dir,
@@ -109,7 +131,9 @@ std::string resolve_path_token(const std::string &raw, const fs::path &base_dir,
 
 bool read_file_lines(const fs::path &path, std::vector<std::string> &out) {
     std::ifstream f(path);
-    if (!f.is_open()) return false;
+    if (!f.is_open()) {
+        return read_godot_file_lines(String(path.string().c_str()), out);
+    }
     std::string line;
     while (std::getline(f, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -164,7 +188,9 @@ std::string resolve_path_token(const std::string &raw, const std::string &base_d
 
 bool read_file_lines(const std::string &path, std::vector<std::string> &out) {
     std::ifstream f(path);
-    if (!f.is_open()) return false;
+    if (!f.is_open()) {
+        return read_godot_file_lines(String(path.c_str()), out);
+    }
     std::string line;
     while (std::getline(f, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -529,6 +555,23 @@ bool CircuitSimulator::run_continuous(const String &spice_path, const String &pd
         }
         continuous_running = false;
     });
+#elif defined(__EMSCRIPTEN_PTHREADS__)
+    // Threaded web: keep ngspice off the browser/Godot main thread.
+    continuous_thread = std::thread([this]() {
+        {
+            std::lock_guard<std::mutex> lock(ng_command_mutex);
+            if (ngSpice_Command((char*)"bg_run") != 0) {
+                UtilityFunctions::printerr("ngspice bg_run failed");
+                continuous_running = false;
+                return;
+            }
+        }
+        while (!continuous_stop_requested.load()) {
+            if (!ngSpice_running()) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(continuous_sleep_ms));
+        }
+        continuous_running = false;
+    });
 #else
     // Web: single-threaded — run synchronously, callbacks fire inline.
     if (ngSpice_Command((char*)"run") != 0) {
@@ -562,8 +605,14 @@ void CircuitSimulator::stop_continuous_thread() {
         if (lock.owns_lock()) ng_Command((char*)"bg_halt");
     }
     if (continuous_thread.joinable()) continuous_thread.join();
+#elif defined(__EMSCRIPTEN_PTHREADS__)
+    if (initialized) {
+        std::unique_lock<std::mutex> lock(ng_command_mutex, std::try_to_lock);
+        if (lock.owns_lock()) ngSpice_Command((char*)"bg_halt");
+    }
+    if (continuous_thread.joinable()) continuous_thread.join();
 #else
-    if (initialized) ngSpice_Command((char*)"halt");
+    if (initialized && continuous_running.load()) ngSpice_Command((char*)"halt");
 #endif
     continuous_running = false;
 }
@@ -587,7 +636,7 @@ void CircuitSimulator::ingest_signal_names(const PackedStringArray &names) {
 
 void CircuitSimulator::ingest_sample(const PackedFloat64Array &sample) {
     const int64_t count = continuous_sample_count.fetch_add(1) + 1;
-    if (count % 64 == 0) {
+    if (count % SIMULATION_DATA_EMIT_STRIDE == 0) {
         call_deferred("emit_signal", "simulation_data_ready", sample);
     }
 }

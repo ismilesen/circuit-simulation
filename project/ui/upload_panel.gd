@@ -424,10 +424,6 @@ func _on_run_pressed() -> void:
 		_set_error("No complete project (needs both an xschem and a spice file).")
 		return
 
-	if OS.has_feature("web"):
-		_set_error("Web build: ngspice runtime is not supported.")
-		return
-
 	_sim = _resolve_simulator()
 	if _sim == null:
 		_set_error("Could not find CircuitSimulator node.")
@@ -446,12 +442,14 @@ func _on_run_pressed() -> void:
 		return
 
 	var spice_entry: Dictionary = selected_proj["spice"]
-	var os_path := ProjectSettings.globalize_path(str(spice_entry["user_path"]))
+	var spice_user_path := str(spice_entry["user_path"])
+	# Web uploads live behind Godot's user:// filesystem; the simulator can read that path directly.
+	var sim_path := spice_user_path if OS.has_feature("web") else ProjectSettings.globalize_path(spice_user_path)
 
 	_refresh_status("starting simulation...", StatusTone.WARN)
 
 	# Single call: C++ handles initialization, netlist loading, and bg_run.
-	var ok: bool = bool(_sim.call("run_continuous", os_path))
+	var ok: bool = bool(_sim.call("run_continuous", sim_path))
 	if not ok:
 		_set_error("run_continuous() failed.")
 		return

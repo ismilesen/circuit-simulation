@@ -1,6 +1,6 @@
 [gd_scene format=3 uid="uid://cwxbquf77njtx"]
 
-[ext_resource type="Script" uid="uid://yamoo75s5xgj" path="res://ui/upload_panel.gd" id="1"]
+[ext_resource type="Script" path="res://ui/upload_panel.gd" id="1"]
 
 [node name="UploadPanel" type="Panel" unique_id=799116703]
 anchors_preset = 15

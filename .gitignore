@@ -26,6 +26,12 @@ project/bin/*.lib
 
 # Export
 # export_presets.cfg SHARED EXPORT SETTINGS
+project/build/*
+!project/build/.gdignore
+project/web/index*
+project/web/*.import
+project/web/libcircuit_sim*.wasm
+project/web/version.txt
 
 # OS
 .DS_Store

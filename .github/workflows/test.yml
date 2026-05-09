@@ -1,8 +1,8 @@
-name: Test Godot Install
+name: Test Threaded Godot Web Export
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "**" ]
   workflow_dispatch:
 
 permissions:
@@ -26,7 +26,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: libngspice-44.2.zip
-          key: libngspice-44.2-${{ hashFiles('.github/docker/ngspice-wasm.Dockerfile') }}
+          key: libngspice-44.2-threaded-${{ hashFiles('.github/docker/ngspice-wasm.Dockerfile', 'scripts/build_libngspice_wasm_docker.sh') }}
 
       - name: Set up Docker Buildx
         if: steps.cache-libngspice.outputs.cache-hit != 'true'
@@ -40,101 +40,11 @@ jobs:
         if: steps.cache-libngspice.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          if [ -x ./scripts/build_libngspice_wasm_docker.sh ]; then
-            ./scripts/build_libngspice_wasm_docker.sh ./libngspice-44.2.zip
-            exit 0
-          fi
-
-          docker run --rm \
-            -v "$PWD:/work" \
-            -w /work \
-            ngspice-wasm-build \
-            bash -lc '
-              set -euo pipefail
-              source /opt/emsdk/emsdk_env.sh >/dev/null
-
-              apply_patch_if_needed() {
-                local patch_file="$1"
-                if patch -N -p1 --dry-run < "$patch_file" >/dev/null 2>&1; then
-                  patch -N -p1 < "$patch_file"
-                fi
-              }
-
-              mkdir -p .tmp/ngspice-web-build
-              cd .tmp/ngspice-web-build
-
-              if [ ! -f ngspice-44.2.zip ]; then
-                curl -L -o ngspice-44.2.zip https://github.com/danchitnis/ngspice-sf-mirror/archive/refs/tags/ngspice-44.2.zip
-              fi
-              if [ ! -d ngspice-sf-mirror-ngspice-44.2 ]; then
-                unzip -q ngspice-44.2.zip
-              fi
-
-              cd ngspice-sf-mirror-ngspice-44.2
-
-              apply_patch_if_needed /opt/pyodide-recipes/packages/libngspice/patches/0001-keep-alive-API-functions.patch
-              apply_patch_if_needed /opt/pyodide-recipes/packages/libngspice/patches/0002-fix-hicum2-extern-c.patch
-              apply_patch_if_needed /opt/pyodide-recipes/packages/libngspice/patches/0003-fix-verilog-install-hook.patch
-
-              bash ./autogen.sh
-
-              if [ ! -x build-native/src/xspice/cmpp/cmpp ]; then
-                mkdir -p build-native
-                cd build-native
-                ../configure --enable-xspice --disable-debug --without-x --with-readline=no
-                make -C src/xspice/cmpp -j ${PYODIDE_JOBS:-3}
-                cd ..
-              fi
-
-              rm -rf release-lib /tmp/ng-install /work/.tmp/libngspice-package
-              mkdir -p release-lib
-              cd release-lib
-
-              WASM_COMPILE_FLAGS="-O2 -fPIC -fwasm-exceptions -sSUPPORT_LONGJMP=wasm"
-              WASM_LINK_FLAGS="-fwasm-exceptions -sSIDE_MODULE=1 -sSUPPORT_LONGJMP=wasm"
-
-              ac_cv_func_queryperformancecounter=no emconfigure ../configure \
-                --prefix=/tmp/ng-install \
-                --enable-xspice \
-                --disable-debug \
-                --disable-dependency-tracking \
-                --enable-cider \
-                --with-readline=no \
-                --disable-openmp \
-                --with-ngshared \
-                --host=wasm32-unknown-emscripten \
-                CFLAGS="$WASM_COMPILE_FLAGS" \
-                CXXFLAGS="$WASM_COMPILE_FLAGS" \
-                LDFLAGS="$WASM_LINK_FLAGS"
-
-              emmake make -j ${PYODIDE_JOBS:-3} -C src/xspice/cmpp \
-                CFLAGS="$WASM_COMPILE_FLAGS" \
-                CXXFLAGS="$WASM_COMPILE_FLAGS" \
-                LDFLAGS="$WASM_LINK_FLAGS"
-              cp ../build-native/src/xspice/cmpp/cmpp src/xspice/cmpp/cmpp
-              touch src/xspice/cmpp/cmpp
-
-              emmake make -j ${PYODIDE_JOBS:-3} \
-                CFLAGS="$WASM_COMPILE_FLAGS" \
-                CXXFLAGS="$WASM_COMPILE_FLAGS" \
-                LDFLAGS="$WASM_LINK_FLAGS"
-              emmake make install
-
-              /opt/emsdk/upstream/bin/wasm-dis /tmp/ng-install/lib/libngspice.so -o /tmp/libngspice.wast
-              python3 -c '"'"'import re,sys; s=open("/tmp/libngspice.wast","r",errors="ignore").read(); imports=set(re.findall(r"\(import \"env\" \"([^\"]+)\"", s)); banned=sorted(name for name in imports if name=="emscripten_longjmp" or name.startswith("invoke_")); (print("ERROR: Incompatible imports in libngspice.so:", file=sys.stderr), [print(f"  - {name}", file=sys.stderr) for name in banned], sys.exit(1)) if banned else None'"'"'
-
-              mkdir -p /work/.tmp/libngspice-package/ngspice/lib/ngspice
-              cp /tmp/ng-install/lib/libngspice.so /work/.tmp/libngspice-package/ngspice/libngspice.so
-              cp /tmp/ng-install/lib/ngspice/*.cm /work/.tmp/libngspice-package/ngspice/lib/ngspice/
-            '
-
-          OUT_ZIP="$PWD/libngspice-44.2.zip"
-          rm -f "$OUT_ZIP"
-          (cd .tmp/libngspice-package && zip -qry "$OUT_ZIP" ngspice)
+          THREADS=yes ./scripts/build_libngspice_wasm_docker.sh ./libngspice-44.2.zip
           if command -v zipinfo >/dev/null 2>&1; then
-            ZIP_ENTRIES="$(zipinfo -1 "$OUT_ZIP")"
+            ZIP_ENTRIES="$(zipinfo -1 ./libngspice-44.2.zip)"
           else
-            ZIP_ENTRIES="$(unzip -l "$OUT_ZIP" | awk '"'"'NR > 3 && $0 !~ /^--------/ { print $4 }'"'"')"
+            ZIP_ENTRIES="$(unzip -l ./libngspice-44.2.zip | awk 'NR > 3 && $0 !~ /^--------/ { print $4 }')"
           fi
           if ! printf "%s\n" "$ZIP_ENTRIES" | grep -Eq "(^|/)libngspice\\.so$"; then
             echo "ERROR: Built libngspice-44.2.zip is missing libngspice.so"
@@ -177,14 +87,11 @@ jobs:
           set -euo pipefail
           TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/4.6.stable"
           ls -la "$TEMPLATE_DIR"
-          test -f "$TEMPLATE_DIR/web_dlink_nothreads_release.zip"
-          test -f "$TEMPLATE_DIR/web_dlink_nothreads_debug.zip"
+          test -f "$TEMPLATE_DIR/web_dlink_release.zip"
+          test -f "$TEMPLATE_DIR/web_dlink_debug.zip"
 
       - name: Install SCons
         run: sudo apt-get update && sudo apt-get install -y scons
-
-      - name: Setup Emscripten
-        uses: mymindstorm/setup-emsdk@v14
 
       - name: Download ngspice header
         run: |
@@ -196,36 +103,34 @@ jobs:
         run: |
           rm -f project/bin/circuit_sim.gdextension project/bin/circuit_sim.gdextension.uid
 
-      - name: Build GDExtension libraries
+      - name: Build desktop GDExtension libraries
         run: |
           mkdir -p project/bin
           scons platform=linux target=template_debug
           scons platform=linux target=template_release
-          scons platform=web target=template_debug threads=no
-          scons platform=web target=template_release threads=no
+
+      - name: Build ngspice WASM image
+        run: docker build -f .github/docker/ngspice-wasm.Dockerfile -t ngspice-wasm-build .
+
+      - name: Build threaded web GDExtension libraries
+        run: |
+          THREADS=yes TARGET=template_debug ./scripts/build_web_gdextension_docker.sh
+          THREADS=yes TARGET=template_release ./scripts/build_web_gdextension_docker.sh
 
       - name: Check build
         run: ls project/bin
 
-      - name: Normalize web GDExtension filenames
+      - name: Validate threaded web GDExtension filenames
         run: |
           set -euo pipefail
           BIN_DIR="project/bin"
-          ACTUAL_RELEASE="$(ls "$BIN_DIR"/libcircuit_sim.web.template_release.wasm32*.wasm 2>/dev/null | head -n 1 || true)"
-          if [ -z "$ACTUAL_RELEASE" ]; then
-            echo "Could not find built web release wasm in $BIN_DIR"
-            ls -la "$BIN_DIR"
+          test -f "$BIN_DIR/libcircuit_sim.web.template_debug.wasm32.wasm"
+          test -f "$BIN_DIR/libcircuit_sim.web.template_release.wasm32.wasm"
+          if find "$BIN_DIR" -maxdepth 1 -type f -name 'libcircuit_sim.web.*.nothreads.wasm' | grep -q .; then
+            echo "ERROR: threaded web build must not produce or package .nothreads wasm artifacts"
+            find "$BIN_DIR" -maxdepth 1 -type f -name 'libcircuit_sim.web.*.wasm' -print
             exit 1
           fi
-
-          for EXPECTED in \
-            "$BIN_DIR/libcircuit_sim.web.template_release.wasm32.wasm" \
-            "$BIN_DIR/libcircuit_sim.web.template_release.wasm32.nothreads.wasm"
-          do
-            if [ ! -f "$EXPECTED" ]; then
-              cp "$ACTUAL_RELEASE" "$EXPECTED"
-            fi
-          done
 
       - name: Validate release web GDExtension binary exists
         run: |
@@ -254,66 +159,23 @@ jobs:
           mkdir -p build/web/release
           godot --headless --export-release "Web" build/web/release/index.html
 
-      - name: Package web upload bridge and dev server
-        run: |
-          cp project/web/upload_bridge.js project/build/web/release/upload_bridge.js
-          cp project/web/server.js project/build/web/release/server.js
-
-      - name: Package ngspice WASM files in web release
-        run: |
-          set -euo pipefail
-          tmp_unpack="$(mktemp -d)"
-          unzip -oq ./libngspice-44.2.zip -d "$tmp_unpack"
-          found_lib="$(find "$tmp_unpack" -type f -name 'libngspice.so' | head -n 1 || true)"
-          if [ -z "$found_lib" ]; then
-            echo "ERROR: libngspice.so not found in libngspice-44.2.zip"
-            echo "Archive entries:"
-            unzip -l ./libngspice-44.2.zip | sed -n '1,120p'
-            exit 1
-          fi
-          mkdir -p project/build/web/release/ngspice/lib/ngspice
-          cp "$found_lib" project/build/web/release/ngspice/libngspice.so
-          find "$tmp_unpack" -type f -name '*.cm' -exec cp {} project/build/web/release/ngspice/lib/ngspice/ \;
-          rm -rf "$tmp_unpack"
-
-      - name: Patch index.html ngspice preload
-        run: |
-          set -euo pipefail
-          node <<'NODE'
-          const fs = require("fs");
-          const htmlPath = "project/build/web/release/index.html";
-          let html = fs.readFileSync(htmlPath, "utf8");
-          const configRegex = /const GODOT_CONFIG = (\{[\s\S]*?\});/;
-          const match = html.match(configRegex);
-          if (!match) throw new Error("Could not find GODOT_CONFIG in index.html");
-          const config = JSON.parse(match[1]);
-          const libs = Array.isArray(config.gdextensionLibs) ? config.gdextensionLibs.filter(Boolean) : [];
-          const circuitLibPattern = /^libcircuit_sim\.web\.template_.*\.wasm$/;
-          const circuitLibs = libs.filter((lib) => circuitLibPattern.test(lib));
-          const preferredCircuitLib =
-            circuitLibs.find((lib) => lib.includes("template_release") && lib.includes("nothreads")) ||
-            circuitLibs.find((lib) => lib.includes("template_release")) ||
-            circuitLibs[0] ||
-            "libcircuit_sim.web.template_release.wasm32.nothreads.wasm";
-          const deduped = [];
-          for (const lib of libs) {
-            if (circuitLibPattern.test(lib)) continue;
-            if (!deduped.includes(lib)) deduped.push(lib);
-          }
-          if (!deduped.includes(preferredCircuitLib)) deduped.unshift(preferredCircuitLib);
-          if (!deduped.includes("ngspice/libngspice.so")) deduped.push("ngspice/libngspice.so");
-          config.gdextensionLibs = deduped;
-          html = html.replace(configRegex, `const GODOT_CONFIG = ${JSON.stringify(config)};`);
-          fs.writeFileSync(htmlPath, html);
-          NODE
+      - name: Apply ngspice web post-export setup
+        run: ./scripts/enable_ngspice_web_export.sh project/build/web/release ./libngspice-44.2.zip
 
       - name: Validate ngspice web packaging
         run: |
           set -euo pipefail
           test -f project/build/web/release/upload_bridge.js
           test -f project/build/web/release/server.js
+          test -f project/build/web/release/libngspice.so
           test -f project/build/web/release/ngspice/libngspice.so
-          grep -Eq 'ngspice/libngspice\.so' project/build/web/release/index.html
+          grep -Eq 'libngspice\.so' project/build/web/release/index.html
+          grep -Eq 'const GODOT_THREADS_ENABLED = true;' project/build/web/release/index.html
+          if find project/build/web/release -maxdepth 1 -type f -name 'libcircuit_sim.web.*.nothreads.wasm' | grep -q .; then
+            echo "ERROR: web export contains stale .nothreads wasm artifacts"
+            find project/build/web/release -maxdepth 1 -type f -name 'libcircuit_sim.web.*.wasm' -print
+            exit 1
+          fi
           node <<'NODE'
           const fs = require("fs");
           const html = fs.readFileSync("project/build/web/release/index.html", "utf8");
@@ -325,10 +187,34 @@ jobs:
           if (circuitLibs.length !== 1) {
             throw new Error(`Expected exactly 1 libcircuit_sim web side module, found ${circuitLibs.length}: ${JSON.stringify(circuitLibs)}`);
           }
-          if (!libs.includes("ngspice/libngspice.so")) {
-            throw new Error("ngspice/libngspice.so is missing from gdextensionLibs");
+          if (circuitLibs[0].includes("nothreads")) {
+            throw new Error(`Threaded export references a non-threaded GDExtension: ${circuitLibs[0]}`);
+          }
+          if (!libs.includes("libngspice.so")) {
+            throw new Error("libngspice.so is missing from gdextensionLibs");
           }
           NODE
+
+      - name: Validate exported wasm modules use shared memory
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            ngspice-wasm-build \
+            bash -lc '
+              set -euo pipefail
+              source /opt/emsdk/emsdk_env.sh >/dev/null
+              find project/build/web/release -type f \( -name "*.wasm" -o -name "*.so" -o -name "*.cm" \) | sort | while read -r f; do
+                /opt/emsdk/upstream/bin/wasm-dis "$f" -o /tmp/check.wast >/dev/null
+                memory_import="$(grep -m1 "(import \"env\" \"memory\"" /tmp/check.wast || true)"
+                echo "$f :: $memory_import"
+                case "$memory_import" in
+                  *" shared)"*) ;;
+                  *) echo "ERROR: $f does not import shared memory"; exit 1 ;;
+                esac
+              done
+            '
 
       - name: Show build output
         run: ls -R project/build/web
@@ -358,6 +244,7 @@ jobs:
   deploy-pages:
     name: Deploy to GitHub Pages
     needs: test-godot
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       pages: write

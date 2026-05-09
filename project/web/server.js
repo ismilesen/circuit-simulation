@@ -13,7 +13,7 @@ const path = require("path");
 
 const PORT = 8080;
 const SERVE_DIR = __dirname;
-const NGSPICE_SIDE_MODULE_REL_PATH = "ngspice/libngspice.so";
+const NGSPICE_SIDE_MODULE_REL_PATH = "libngspice.so";
 
 const MIME_TYPES = {
   ".html": "text/html",
@@ -62,7 +62,7 @@ const server = http.createServer((req, res) => {
 });
 
 function checkNgspiceWebSetup() {
-  const ngspiceLibPath = path.join(SERVE_DIR, "ngspice", "libngspice.so");
+  const ngspiceLibPath = path.join(SERVE_DIR, NGSPICE_SIDE_MODULE_REL_PATH);
   if (!fs.existsSync(ngspiceLibPath)) {
     console.warn(
       "WARNING: Missing ngspice side module at " + ngspiceLibPath +

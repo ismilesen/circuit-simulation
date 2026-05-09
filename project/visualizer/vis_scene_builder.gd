@@ -4,7 +4,7 @@ extends RefCounted
 ## Builds the 3-D scene from a parsed schematic.
 ## After draw_circuit() completes, _vis._net_materials is populated with one
 ## StandardMaterial3D per labeled net, ready for the simulation to update
-## their emission_energy_multiplier every 64 ngspice time-steps.
+## their emission_energy_multiplier when simulation_data_ready samples arrive.
 
 var _vis
 

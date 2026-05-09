@@ -25,7 +25,7 @@
 #include "ngspice_types.h"
 
 // Web only: declare ngspice symbols directly so the linker resolves them
-// from the preloaded Emscripten side module (ngspice/libngspice.so).
+// from the preloaded Emscripten side module (libngspice.so).
 // On Windows/Linux these are loaded at runtime via LoadLibrary/dlopen instead.
 #ifdef __EMSCRIPTEN__
 extern "C" {
