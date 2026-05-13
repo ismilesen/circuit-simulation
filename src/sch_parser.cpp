@@ -226,6 +226,8 @@ String SchParser::get_component_type(const String &symbol) const {
         return "resistor";
     } else if (symbol.find("cap") != -1) {
         return "capacitor";
+    } else if (symbol.find("button") != -1) {
+        return "button";
     }
     return "unknown";
 }
