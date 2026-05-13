@@ -75,6 +75,8 @@ var _ws_name_dialog: AcceptDialog = null
 var _ws_name_edit: LineEdit = null
 var _pending_ws_name_action: String = ""
 
+var _external_re: RegEx = null
+
 # -------------------------------------------------------------------
 # Ready
 # -------------------------------------------------------------------
@@ -110,6 +112,9 @@ func _ready() -> void:
 		if get_viewport() != null:
 			if not get_viewport().files_dropped.is_connected(Callable(self, "_on_os_files_dropped")):
 				get_viewport().files_dropped.connect(Callable(self, "_on_os_files_dropped"))
+
+	_external_re = RegEx.new()
+	_external_re.compile("(?i)\\bexternal\\b")
 
 	_sim = _resolve_simulator()
 	_refresh_status("idle", StatusTone.IDLE)
@@ -265,15 +270,23 @@ func _assign_spice(slot: Dictionary) -> void:
 		"name": basename,
 		"xschem": null,
 		"spice": slot,
-		"complete": false
+		"complete": false,
+		"buttons": [],
+		"switch_states": {}
 	})
 	spice_paired.emit(str(slot.get("user_path", "")))
 
 func _assign_xschem(slot: Dictionary) -> void:
+	var buttons := _parse_buttons_from_sch(str(slot.get("user_path", "")))
+	var sw: Dictionary = {}
+	for b in buttons:
+		sw[b] = false
 	for proj in projects:
 		if proj["xschem"] == null:
 			proj["xschem"] = slot
 			proj["complete"] = proj["spice"] != null
+			proj["buttons"] = buttons
+			proj["switch_states"] = sw
 			schematic_requested.emit(str(slot.get("user_path", "")))
 			return
 	var basename := (slot["display"] as String).get_basename()
@@ -281,7 +294,9 @@ func _assign_xschem(slot: Dictionary) -> void:
 		"name": basename,
 		"xschem": slot,
 		"spice": null,
-		"complete": false
+		"complete": false,
+		"buttons": buttons,
+		"switch_states": sw
 	})
 	schematic_requested.emit(str(slot.get("user_path", "")))
 
@@ -317,6 +332,12 @@ func _assign_to_pending_slot(slot: Dictionary) -> void:
 			return
 		proj["xschem"] = slot
 		proj["complete"] = proj["spice"] != null
+		var buttons := _parse_buttons_from_sch(str(slot.get("user_path", "")))
+		var sw: Dictionary = {}
+		for b in buttons:
+			sw[b] = false
+		proj["buttons"] = buttons
+		proj["switch_states"] = sw
 		schematic_requested.emit(str(slot.get("user_path", "")))
 
 # -------------------------------------------------------------------
@@ -443,6 +464,13 @@ func _on_run_pressed() -> void:
 
 	var spice_entry: Dictionary = selected_proj["spice"]
 	var spice_user_path := str(spice_entry["user_path"])
+
+	var switch_states: Dictionary = selected_proj.get("switch_states", {})
+	if not switch_states.is_empty():
+		var patched := _patch_spice_for_switches(spice_user_path, switch_states)
+		if patched != "":
+			spice_user_path = patched
+
 	# Web uploads live behind Godot's user:// filesystem; the simulator can read that path directly.
 	var sim_path := spice_user_path if OS.has_feature("web") else ProjectSettings.globalize_path(spice_user_path)
 
@@ -490,10 +518,15 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 			card.add_theme_stylebox_override("panel", _sb_card.duplicate())
 	)
 
+	var vbox := VBoxContainer.new()
+	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vbox.add_theme_constant_override("separation", 4)
+	card.add_child(vbox)
+
 	var hbox := HBoxContainer.new()
 	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_theme_constant_override("separation", 6)
-	card.add_child(hbox)
+	vbox.add_child(hbox)
 
 	var col_primary: Color   = Color("E0DDD4") if _dark_mode else Color(0, 0, 0)
 	var col_secondary: Color = Color("8A8880") if _dark_mode else Color("606060")
@@ -551,6 +584,31 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 	size_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(size_lbl)
 
+	var buttons: Array = proj.get("buttons", [])
+	if buttons.size() > 0:
+		var sw_row := HBoxContainer.new()
+		sw_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		sw_row.add_theme_constant_override("separation", 8)
+		vbox.add_child(sw_row)
+
+		var sw_lbl := Label.new()
+		sw_lbl.text = "Switches:"
+		sw_lbl.add_theme_color_override("font_color", col_secondary)
+		sw_lbl.add_theme_font_size_override("font_size", 12)
+		sw_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		sw_row.add_child(sw_lbl)
+
+		var sw_states: Dictionary = proj.get("switch_states", {})
+		for btn_name_v in buttons:
+			var btn_name := str(btn_name_v)
+			var toggle := CheckButton.new()
+			toggle.text = btn_name
+			toggle.button_pressed = bool(sw_states.get(btn_name, false))
+			toggle.add_theme_font_size_override("font_size", 12)
+			toggle.mouse_filter = Control.MOUSE_FILTER_STOP
+			toggle.toggled.connect(func(on: bool): _on_switch_toggled(idx, btn_name, on))
+			sw_row.add_child(toggle)
+
 	return card
 
 func _build_slot_control(proj_idx: int, slot_key: String, slot_data: Variant) -> Control:
@@ -583,6 +641,13 @@ func _on_card_gui_input(event: InputEvent, idx: int) -> void:
 		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
 			_selected_project = idx
 			_rebuild_cards.call_deferred()
+
+func _on_switch_toggled(proj_idx: int, btn_name: String, on: bool) -> void:
+	if proj_idx < 0 or proj_idx >= projects.size():
+		return
+	var sw: Dictionary = projects[proj_idx].get("switch_states", {})
+	sw[btn_name] = on
+	projects[proj_idx]["switch_states"] = sw
 
 func _on_slot_plus_pressed(proj_idx: int, slot_key: String) -> void:
 	_pending_slot_project = proj_idx
@@ -847,7 +912,9 @@ func _load_workspace_zip_from_path(path: String) -> void:
 				"name": str(pm.get("name", "unnamed")),
 				"xschem": null,
 				"spice": null,
-				"complete": false
+				"complete": false,
+				"buttons": [],
+				"switch_states": {}
 			}
 			for slot_key in ["xschem", "spice"]:
 				var sv: Variant = pm.get(slot_key, null)
@@ -876,6 +943,13 @@ func _load_workspace_zip_from_path(path: String) -> void:
 					"bytes": buf.size(),
 					"ext": safe_name.get_extension().to_lower()
 				}
+				if slot_key == "xschem":
+					var buttons := _parse_buttons_from_sch(user_path)
+					var sw: Dictionary = {}
+					for b in buttons:
+						sw[b] = false
+					new_proj["buttons"] = buttons
+					new_proj["switch_states"] = sw
 			new_proj["complete"] = new_proj["xschem"] != null and new_proj["spice"] != null
 			projects.append(new_proj)
 		reader.close()
@@ -913,6 +987,62 @@ func _load_workspace_zip_from_bytes(bytes: PackedByteArray) -> bool:
 	f.close()
 	_load_workspace_zip_from_path(tmp_path)
 	return true
+
+# -------------------------------------------------------------------
+# Button / switch helpers
+# -------------------------------------------------------------------
+
+func _parse_buttons_from_sch(user_path: String) -> Array:
+	if user_path == "":
+		return []
+	if not ClassDB.class_exists("SchParser"):
+		return []
+	var parser: Object = ClassDB.instantiate("SchParser")
+	if parser == null or not parser.has_method("parse_file"):
+		return []
+	if not parser.call("parse_file", user_path):
+		return []
+	var buttons: Array = []
+	for comp_v in parser.call("get_components"):
+		var comp := comp_v as Dictionary
+		if str(comp.get("type", "")) == "button":
+			var name := str(comp.get("name", ""))
+			if name != "":
+				buttons.append(name)
+	return buttons
+
+func _patch_spice_for_switches(user_path: String, switch_states: Dictionary) -> String:
+	var fa := FileAccess.open(user_path, FileAccess.READ)
+	if fa == null:
+		return ""
+	var content := fa.get_as_text()
+	fa.close()
+
+	var lines := content.split("\n")
+	var modified := false
+
+	for btn_name_v in switch_states:
+		var btn_name := str(btn_name_v)
+		var on: bool = bool(switch_states[btn_name_v])
+		var voltage := "DC 1.8" if on else "DC 0"
+		for i in lines.size():
+			if lines[i].strip_edges().to_lower().begins_with(btn_name.to_lower()):
+				var new_line: String = _external_re.sub(lines[i], voltage)
+				if new_line != lines[i]:
+					lines[i] = new_line
+					modified = true
+
+	if not modified:
+		return ""
+
+	_ensure_upload_dir()
+	var tmp_path := "%s/_sim_%d.spice" % [UPLOAD_DIR, int(Time.get_unix_time_from_system())]
+	var wf := FileAccess.open(tmp_path, FileAccess.WRITE)
+	if wf == null:
+		return ""
+	wf.store_string("\n".join(lines))
+	wf.close()
+	return tmp_path
 
 # -------------------------------------------------------------------
 # Helpers
