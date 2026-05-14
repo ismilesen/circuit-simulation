@@ -246,6 +246,8 @@ func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
 	elif XSCHEM_EXTS.has(ext):
 		_assign_xschem(slot)
 	elif NETLIST_EXTS.has(ext):
+		if ext == "spice" and _spice_has_subckt(user_path):
+			_set_error("Contains .subckt")
 		_assign_spice(slot)
 	else:
 		_log("[color=#b56a00][b]Warning:[/b][/color] Unrecognised extension '%s', skipped." % ext)
@@ -268,6 +270,19 @@ func _assign_spice(slot: Dictionary) -> void:
 		"complete": false
 	})
 	spice_paired.emit(str(slot.get("user_path", "")))
+
+# checks .spice for ".subckt"
+func _spice_has_subckt(path: String) -> bool:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return false
+	while not f.eof_reached():
+		var line := f.get_line().strip_edges().to_lower()
+		if line.begins_with(".subckt"):
+			f.close()
+			return true
+	f.close()
+	return false
 
 func _assign_xschem(slot: Dictionary) -> void:
 	for proj in projects:
