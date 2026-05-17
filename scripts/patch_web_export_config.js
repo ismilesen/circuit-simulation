@@ -95,6 +95,10 @@ if (fs.existsSync(serviceWorkerPath)) {
     /const CACHE_VERSION = ['"][^'"]+['"];/,
     `const CACHE_VERSION = '${cacheVersion}';`
   );
+  worker = worker.replace(
+    "const crossOriginIsolatedHeaders = new Headers(response.headers);\n",
+    "const crossOriginIsolatedHeaders = new Headers(response.headers);\n\tcrossOriginIsolatedHeaders.delete('Content-Encoding');\n\tcrossOriginIsolatedHeaders.delete('Content-Length');\n"
+  );
   fs.writeFileSync(serviceWorkerPath, worker);
   console.log("Updated service worker CACHE_VERSION:", cacheVersion);
 }

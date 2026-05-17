@@ -247,6 +247,7 @@ jobs:
           if grep -Eq '^progressive_web_app/enabled=true$' project/export_presets.cfg; then
             require_file "$EXPORT_DIR/index.service.worker.js"
             require_pattern '"serviceWorker":"index\.service\.worker\.js"' "$EXPORT_DIR/index.html" "service worker config"
+            require_pattern "Content-Encoding" "$EXPORT_DIR/index.service.worker.js" "service worker content-encoding cleanup"
           fi
           if find project/build/web/release -maxdepth 1 -type f -name 'libcircuit_sim.web.*.nothreads.wasm' | grep -q .; then
             echo "ERROR: web export contains stale .nothreads wasm artifacts"
