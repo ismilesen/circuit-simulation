@@ -27,8 +27,11 @@ RUN git clone https://github.com/emscripten-core/emsdk.git "${EMSDK_DIR}" \
     && ./emsdk install "${EMS_VERSION}" \
     && ./emsdk activate "${EMS_VERSION}"
 
-# Build and cache pyodide recipe dependencies in the image.
+# Keep the Pyodide libngspice recipe available for its compatibility patches.
+# The ngspice source itself is downloaded by scripts/build_libngspice_wasm_docker.sh
+# from the pinned GitHub mirror tag. Building the recipe here would repeat an
+# unrelated source fetch and can break when Pyodide's upstream URL changes.
 RUN cd "${PYODIDE_RECIPES_DIR}" \
-    && source "${EMSDK_DIR}/emsdk_env.sh" \
-    && mkdir -p "${PYODIDE_INSTALL_DIR}" \
-    && pyodide build-recipes libngspice --install --install-dir="${PYODIDE_INSTALL_DIR}"
+    && test -f packages/libngspice/patches/0001-keep-alive-API-functions.patch \
+    && test -f packages/libngspice/patches/0002-fix-hicum2-extern-c.patch \
+    && test -f packages/libngspice/patches/0003-fix-verilog-install-hook.patch
