@@ -3,6 +3,7 @@ extends Control
 signal schematic_requested(path: String)
 signal spice_paired(path: String)
 signal dark_mode_changed(dark_mode: bool)
+signal pdk_component_selected(component: Dictionary)
 
 @export var simulator_path: NodePath = NodePath("..")
 const UPLOAD_DIR := "user://uploads"
@@ -10,6 +11,7 @@ const UPLOAD_DIR := "user://uploads"
 const WORKSPACE_EXT := ".cvw.zip"
 const WORKSPACE_MANIFEST := "manifest.json"
 const WORKSPACE_FILES_DIR := "files/"
+const WEB_PDK_CACHE_ROOT := "user://pdks/sky130"
 
 var NETLIST_EXTS: PackedStringArray = PackedStringArray(["spice", "cir", "net", "txt"])
 var XSCHEM_EXTS: PackedStringArray = PackedStringArray(["sch", "sym"])
@@ -74,6 +76,15 @@ var _ws_mode: String = ""
 var _ws_name_dialog: AcceptDialog = null
 var _ws_name_edit: LineEdit = null
 var _pending_ws_name_action: String = ""
+var _pdk_manifest: Variant = null
+var _pdk_components: Array[Dictionary] = []
+var _pdk_filtered_components: Array[Dictionary] = []
+var _pdk_section: PanelContainer = null
+var _pdk_search: LineEdit = null
+var _pdk_list: ItemList = null
+var _pdk_status: Label = null
+var _pdk_models_ready: bool = false
+var _pdk_model_request: HTTPRequest = null
 
 # -------------------------------------------------------------------
 # Ready
@@ -83,6 +94,7 @@ func _ready() -> void:
 	_apply_theme()
 	_ensure_upload_dir()
 	_ensure_ws_name_popup()
+	_setup_pdk_browser()
 
 	file_dialog.access = FileDialog.ACCESS_FILESYSTEM
 	file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILES
@@ -123,9 +135,145 @@ func _ready() -> void:
 		else:
 			_log("[color=#b56a00][b]Warning:[/b][/color] Web upload bridge not detected yet.")
 
+func set_pdk_manifest(manifest: Variant) -> void:
+	_pdk_manifest = manifest
+	_pdk_components.clear()
+	if manifest != null:
+		for item: Dictionary in manifest.symbols:
+			_pdk_components.append(item)
+	_pdk_components.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var lib_a := str(a.get("library", ""))
+		var lib_b := str(b.get("library", ""))
+		if lib_a == lib_b:
+			return str(a.get("id", "")) < str(b.get("id", ""))
+		return lib_a < lib_b
+	)
+	_refresh_pdk_browser()
+
 func _process(_delta: float) -> void:
 	if OS.has_feature("web"):
 		_poll_web_queue()
+
+
+# -------------------------------------------------------------------
+# PDK browser
+# -------------------------------------------------------------------
+
+func _setup_pdk_browser() -> void:
+	var root_vbox := get_node_or_null("Margin/VBox")
+	if root_vbox == null:
+		return
+
+	_pdk_section = PanelContainer.new()
+	_pdk_section.name = "PdkComponentBrowser"
+	_pdk_section.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_pdk_section.custom_minimum_size = Vector2(0, 150)
+
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 8)
+	margin.add_theme_constant_override("margin_top", 8)
+	margin.add_theme_constant_override("margin_right", 8)
+	margin.add_theme_constant_override("margin_bottom", 8)
+	_pdk_section.add_child(margin)
+
+	var vbox := VBoxContainer.new()
+	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.add_theme_constant_override("separation", 6)
+	margin.add_child(vbox)
+
+	var header := Label.new()
+	header.text = "Sky130 Components"
+	header.add_theme_font_size_override("font_size", 13)
+	vbox.add_child(header)
+
+	_pdk_search = LineEdit.new()
+	_pdk_search.placeholder_text = "Search components"
+	_pdk_search.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_pdk_search.text_changed.connect(_on_pdk_search_changed)
+	vbox.add_child(_pdk_search)
+
+	_pdk_list = ItemList.new()
+	_pdk_list.custom_minimum_size = Vector2(0, 78)
+	_pdk_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_pdk_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_pdk_list.select_mode = ItemList.SELECT_SINGLE
+	_pdk_list.item_selected.connect(_on_pdk_item_selected)
+	vbox.add_child(_pdk_list)
+
+	_pdk_status = Label.new()
+	_pdk_status.text = "PDK manifest pending"
+	_pdk_status.add_theme_font_size_override("font_size", 10)
+	_pdk_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(_pdk_status)
+
+	var insert_index := root_vbox.get_children().find(drop_zone)
+	if insert_index < 0:
+		root_vbox.add_child(_pdk_section)
+	else:
+		root_vbox.add_child(_pdk_section)
+		root_vbox.move_child(_pdk_section, insert_index)
+	_refresh_pdk_browser()
+
+
+func _refresh_pdk_browser() -> void:
+	if _pdk_list == null:
+		return
+
+	_pdk_filtered_components.clear()
+	_pdk_list.clear()
+
+	var query := ""
+	if _pdk_search != null:
+		query = _pdk_search.text.strip_edges().to_lower()
+
+	for component: Dictionary in _pdk_components:
+		if not _pdk_component_matches(component, query):
+			continue
+		_pdk_filtered_components.append(component)
+		if _pdk_filtered_components.size() >= 80:
+			break
+
+	for component: Dictionary in _pdk_filtered_components:
+		var label := "%s/%s" % [str(component.get("library", "")), str(component.get("id", ""))]
+		var type_name := str(component.get("type", ""))
+		if type_name != "":
+			label += "  " + type_name
+		_pdk_list.add_item(label)
+
+	if _pdk_status != null:
+		if _pdk_components.is_empty():
+			_pdk_status.text = "PDK manifest pending"
+		else:
+			_pdk_status.text = "%d loaded, %d shown" % [_pdk_components.size(), _pdk_filtered_components.size()]
+
+
+func _pdk_component_matches(component: Dictionary, query: String) -> bool:
+	if query == "":
+		return true
+	var haystack := "%s %s %s %s" % [
+		str(component.get("id", "")),
+		str(component.get("name", "")),
+		str(component.get("library", "")),
+		str(component.get("type", "")),
+	]
+	return haystack.to_lower().contains(query)
+
+
+func _on_pdk_search_changed(_text: String) -> void:
+	_refresh_pdk_browser()
+
+
+func _on_pdk_item_selected(index: int) -> void:
+	if index < 0 or index >= _pdk_filtered_components.size():
+		return
+	var component := _pdk_filtered_components[index]
+	pdk_component_selected.emit(component)
+	var type_name := str(component.get("type", "component"))
+	_refresh_status("selected %s" % str(component.get("id", "")), StatusTone.OK)
+	_log("[color=#336699][b]PDK:[/b][/color] Selected %s (%s)." % [
+		str(component.get("id", "")),
+		type_name,
+	])
 
 # -------------------------------------------------------------------
 # Upload flows
@@ -252,7 +400,11 @@ func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
 		return false
 
 	_rebuild_cards()
-	_log("[color=#336699][b]Info:[/b][/color] Staged %s" % safe_name)
+	_log("[color=#336699][b]Info:[/b][/color] Staged %s (%d bytes) -> %s" % [
+		safe_name,
+		bytes.size(),
+		user_path,
+	])
 	return true
 
 # -------------------------------------------------------------------
@@ -261,6 +413,18 @@ func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
 
 func _assign_spice(slot: Dictionary) -> void:
 	var basename := (slot["display"] as String).get_basename()
+	for i in projects.size():
+		var proj: Dictionary = projects[i]
+		if str(proj.get("name", "")) != basename:
+			continue
+		proj["spice"] = slot
+		proj["complete"] = proj["xschem"] != null
+		projects[i] = proj
+		_selected_project = i
+		spice_paired.emit(str(slot.get("user_path", "")))
+		_log("[color=#336699][b]Info:[/b][/color] Replaced SPICE for project '%s'." % basename)
+		return
+
 	projects.append({
 		"name": basename,
 		"xschem": null,
@@ -446,7 +610,18 @@ func _on_run_pressed() -> void:
 	# Web uploads live behind Godot's user:// filesystem; the simulator can read that path directly.
 	var sim_path := spice_user_path if OS.has_feature("web") else ProjectSettings.globalize_path(spice_user_path)
 
+	if OS.has_feature("web"):
+		if _pdk_manifest == null:
+			_set_error("Sky130 PDK manifest is not ready yet. Wait for the PDK manifest to load, then run again.")
+			return
+		_refresh_status("preparing PDK models...", StatusTone.WARN)
+		var pdk_ok: bool = await _ensure_web_pdk_models_ready()
+		if not pdk_ok:
+			_set_error("Could not prepare Sky130 model files for browser simulation.")
+			return
+
 	_refresh_status("starting simulation...", StatusTone.WARN)
+	_log_spice_run_context(spice_entry)
 
 	# Single call: C++ handles initialization, netlist loading, and bg_run.
 	var ok: bool = bool(_sim.call("run_continuous", sim_path))
@@ -456,6 +631,124 @@ func _on_run_pressed() -> void:
 
 	_refresh_status("simulation running", StatusTone.OK)
 	_log("[color=darkgreen][b]OK:[/b][/color] Continuous simulation started.")
+
+
+func _log_spice_run_context(spice_entry: Dictionary) -> void:
+	var user_path := str(spice_entry.get("user_path", ""))
+	var byte_count := int(spice_entry.get("bytes", 0))
+	_log("[color=#336699][b]Info:[/b][/color] Running SPICE file: %s (%d bytes)." % [
+		user_path,
+		byte_count,
+	])
+
+	var f := FileAccess.open(user_path, FileAccess.READ)
+	if f == null:
+		_log("[color=#b56a00][b]Warning:[/b][/color] Could not reopen SPICE file for preview.")
+		return
+	var text := f.get_as_text()
+	f.close()
+
+	var preview_lines: Array[String] = []
+	for raw_line in text.split("\n"):
+		var line := str(raw_line).strip_edges()
+		if line == "":
+			continue
+		var lower := line.to_lower()
+		if lower.begins_with("xm_") or lower.begins_with(".lib") or lower.begins_with(".include"):
+			preview_lines.append(line)
+		if preview_lines.size() >= 4:
+			break
+
+	if preview_lines.is_empty():
+		return
+	_log("[color=#336699][b]Info:[/b][/color] SPICE preview: %s" % " | ".join(preview_lines))
+
+
+func _ensure_web_pdk_models_ready() -> bool:
+	if _pdk_models_ready:
+		return true
+	if _pdk_manifest == null:
+		return false
+
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(WEB_PDK_CACHE_ROOT))
+	if _pdk_model_request == null:
+		_pdk_model_request = HTTPRequest.new()
+		_pdk_model_request.name = "PdkModelRequest"
+		add_child(_pdk_model_request)
+
+	var model_files: Array[Dictionary] = []
+	for entry: Dictionary in _pdk_manifest.files:
+		var rel_path := str(entry.get("path", ""))
+		if rel_path.begins_with("models/"):
+			model_files.append(entry)
+
+	if model_files.is_empty():
+		return false
+
+	var done := 0
+	for entry: Dictionary in model_files:
+		done += 1
+		if done == 1 or done % 50 == 0 or done == model_files.size():
+			_refresh_status("preparing PDK %d/%d" % [done, model_files.size()], StatusTone.WARN)
+		if not await _fetch_and_cache_pdk_file(entry):
+			return false
+
+	_pdk_models_ready = true
+	_refresh_status("PDK models ready", StatusTone.OK)
+	return true
+
+
+func _fetch_and_cache_pdk_file(entry: Dictionary) -> bool:
+	var rel_path := str(entry.get("path", ""))
+	if rel_path == "":
+		return true
+
+	var cache_path := "%s/%s" % [WEB_PDK_CACHE_ROOT, rel_path]
+	if FileAccess.file_exists(cache_path):
+		return true
+
+	var dir_path := cache_path.get_base_dir()
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dir_path))
+
+	var url := _resolve_web_asset_url("pdks/sky130/" + rel_path)
+	var err := _pdk_model_request.request(url)
+	if err != OK:
+		_log("[color=#b00020][b]Error:[/b][/color] Could not request PDK file: %s" % url)
+		return false
+
+	var completed: Array = await _pdk_model_request.request_completed
+	var result := int(completed[0])
+	var response_code := int(completed[1])
+	var body: PackedByteArray = completed[3]
+	if result != HTTPRequest.RESULT_SUCCESS or response_code < 200 or response_code >= 300:
+		_log("[color=#b00020][b]Error:[/b][/color] Could not fetch PDK file %s (HTTP %d, result %d)." % [
+			rel_path,
+			response_code,
+			result,
+		])
+		return false
+
+	var file := FileAccess.open(cache_path, FileAccess.WRITE)
+	if file == null:
+		_log("[color=#b00020][b]Error:[/b][/color] Could not cache PDK file: %s" % cache_path)
+		return false
+	file.store_buffer(body)
+	file.close()
+	return true
+
+
+func _resolve_web_asset_url(path: String) -> String:
+	var relative := path.trim_prefix("/")
+	var script := """
+		(() => {
+			const base = window.location.href.replace(/[#?].*$/, "").replace(/[^/]*$/, "");
+			return new URL("%s", base).toString();
+		})()
+	""" % relative.json_escape()
+	var resolved: Variant = JavaScriptBridge.eval(script, true)
+	if typeof(resolved) == TYPE_STRING and str(resolved) != "":
+		return str(resolved)
+	return relative
 
 func _on_sim_finished() -> void:
 	_refresh_status("simulation finished", StatusTone.OK)

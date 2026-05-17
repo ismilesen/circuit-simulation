@@ -27,23 +27,24 @@ const ARC_SEGMENTS: int = 16
 func setup(comp: Dictionary, definition: SymbolDefinition, scale: float, mat: StandardMaterial3D) -> void:
 	comp_data = comp
 	sym_def = definition
+	var compact_mos_pin_grid := _uses_compact_mos_pin_grid(definition)
 
 	# Lines -> thin BoxMesh bars
 	for line in definition.lines:
-		_add_line_mesh(line, scale, mat)
+		_add_line_mesh(line, scale, mat, compact_mos_pin_grid)
 
 	# Arcs -> segmented line bars (PMOS bubble, etc.)
 	for arc in definition.arcs:
-		_add_arc_mesh(arc, scale, mat)
+		_add_arc_mesh(arc, scale, mat, compact_mos_pin_grid)
 
 	# Polygons -> triangle meshes (arrows, fills)
 	for poly in definition.polygons:
-		_add_polygon_mesh(poly, scale, mat)
+		_add_polygon_mesh(poly, scale, mat, compact_mos_pin_grid)
 
 	# Boxes/Pins -> compute local positions
 	for box in definition.boxes:
 		if box.pin_name != "":
-			var c = box.center()
+			var c := _schematic_point(box.center(), compact_mos_pin_grid)
 			pin_positions[box.pin_name] = Vector3(c.x * scale, 0, c.y * scale)
 
 	# If the symbol has no visual geometry at all, add a small dot marker
@@ -68,9 +69,15 @@ func get_pin_position(pin_name: String) -> Vector3:
 
 # ---------- Geometry Builders ----------
 
-func _add_line_mesh(line: SymbolDefinition.Line, scale: float, mat: StandardMaterial3D) -> void:
-	var from = Vector3(line.p1.x * scale, 0, line.p1.y * scale)
-	var to = Vector3(line.p2.x * scale, 0, line.p2.y * scale)
+func _add_line_mesh(
+		line: SymbolDefinition.Line,
+		scale: float,
+		mat: StandardMaterial3D,
+		compact_mos_pin_grid: bool) -> void:
+	var p1 := _schematic_point(line.p1, compact_mos_pin_grid)
+	var p2 := _schematic_point(line.p2, compact_mos_pin_grid)
+	var from = Vector3(p1.x * scale, 0, p1.y * scale)
+	var to = Vector3(p2.x * scale, 0, p2.y * scale)
 
 	var mid = (from + to) / 2.0
 	var dir = to - from
@@ -88,14 +95,13 @@ func _add_line_mesh(line: SymbolDefinition.Line, scale: float, mat: StandardMate
 	add_child(mi)
 
 
-func _add_arc_mesh(arc: SymbolDefinition.Arc, scale: float, mat: StandardMaterial3D) -> void:
-	var cx: float = arc.cx * scale
-	var cy: float = arc.cy * scale
-	var radius: float = arc.radius * scale
+func _add_arc_mesh(
+		arc: SymbolDefinition.Arc,
+		scale: float,
+		mat: StandardMaterial3D,
+		compact_mos_pin_grid: bool) -> void:
 	var start_deg: float = arc.start_angle
 	var sweep_deg: float = arc.sweep_angle
-
-	var center = Vector3(cx, 0, cy)
 
 	# Render arc as connected line segments (thin bars)
 	var segment_count: int = maxi(4, int(abs(sweep_deg) / 360.0 * ARC_SEGMENTS))
@@ -105,7 +111,11 @@ func _add_arc_mesh(arc: SymbolDefinition.Arc, scale: float, mat: StandardMateria
 	for i in range(segment_count + 1):
 		var angle_deg = start_deg + step_deg * i
 		var angle_rad = deg_to_rad(angle_deg)
-		var point = center + Vector3(cos(angle_rad) * radius, 0, sin(angle_rad) * radius)
+		var local_point := Vector2(
+			arc.cx + cos(angle_rad) * arc.radius,
+			arc.cy + sin(angle_rad) * arc.radius)
+		var schematic_point := _schematic_point(local_point, compact_mos_pin_grid)
+		var point = Vector3(schematic_point.x * scale, 0, schematic_point.y * scale)
 
 		if i > 0:
 			var mid = (prev_point + point) / 2.0
@@ -124,17 +134,21 @@ func _add_arc_mesh(arc: SymbolDefinition.Arc, scale: float, mat: StandardMateria
 		prev_point = point
 
 
-func _add_polygon_mesh(poly: SymbolDefinition.Polygon, scale: float, mat: StandardMaterial3D) -> void:
+func _add_polygon_mesh(
+		poly: SymbolDefinition.Polygon,
+		scale: float,
+		mat: StandardMaterial3D,
+		compact_mos_pin_grid: bool) -> void:
 	if poly.points.size() < 2:
 		return
 
 	if poly.fill and poly.points.size() >= 3:
-		_add_filled_polygon(poly.points, scale, mat)
+		_add_filled_polygon(poly.points, scale, mat, compact_mos_pin_grid)
 	else:
 		# Outline only -> line segments between consecutive points
 		for i in range(poly.points.size() - 1):
-			var p1: Vector2 = poly.points[i]
-			var p2: Vector2 = poly.points[i + 1]
+			var p1: Vector2 = _schematic_point(poly.points[i], compact_mos_pin_grid)
+			var p2: Vector2 = _schematic_point(poly.points[i + 1], compact_mos_pin_grid)
 			var from = Vector3(p1.x * scale, 0, p1.y * scale)
 			var to = Vector3(p2.x * scale, 0, p2.y * scale)
 			var mid = (from + to) / 2.0
@@ -151,15 +165,19 @@ func _add_polygon_mesh(poly: SymbolDefinition.Polygon, scale: float, mat: Standa
 				add_child(mi)
 
 
-func _add_filled_polygon(points: Array[Vector2], scale: float, mat: StandardMaterial3D) -> void:
+func _add_filled_polygon(
+		points: Array[Vector2],
+		scale: float,
+		mat: StandardMaterial3D,
+		compact_mos_pin_grid: bool) -> void:
 	# Fan triangulation from first point (works for convex polygons like arrows)
 	var vertices = PackedVector3Array()
 	var normals = PackedVector3Array()
 
 	for i in range(1, points.size() - 1):
-		var p0: Vector2 = points[0]
-		var p1: Vector2 = points[i]
-		var p2: Vector2 = points[i + 1]
+		var p0: Vector2 = _schematic_point(points[0], compact_mos_pin_grid)
+		var p1: Vector2 = _schematic_point(points[i], compact_mos_pin_grid)
+		var p2: Vector2 = _schematic_point(points[i + 1], compact_mos_pin_grid)
 
 		vertices.append(Vector3(p0.x * scale, 0, p0.y * scale))
 		vertices.append(Vector3(p1.x * scale, 0, p1.y * scale))
@@ -206,3 +224,34 @@ func _add_filled_polygon(points: Array[Vector2], scale: float, mat: StandardMate
 	mi2.mesh = arr_mesh2
 	mi2.material_override = mat
 	add_child(mi2)
+
+
+func _uses_compact_mos_pin_grid(definition: SymbolDefinition) -> bool:
+	var symbol_type := definition.type.to_lower()
+	if symbol_type not in ["pfet", "nfet", "pmos", "nmos"]:
+		return false
+
+	var pins := {}
+	for box in definition.boxes:
+		if box.pin_name != "":
+			pins[box.pin_name.to_upper()] = box.center()
+
+	if not (pins.has("G") and pins.has("D") and pins.has("S")):
+		return false
+
+	var gate: Vector2 = pins["G"]
+	var drain: Vector2 = pins["D"]
+	var source: Vector2 = pins["S"]
+	var compact_gate := is_equal_approx(gate.x, -20.0) and is_equal_approx(gate.y, 0.0)
+	var compact_drain_source := is_equal_approx(drain.x, 20.0) \
+		and is_equal_approx(source.x, 20.0) \
+		and is_equal_approx(absf(drain.y), 30.0) \
+		and is_equal_approx(absf(source.y), 30.0)
+	return compact_gate and compact_drain_source
+
+
+func _schematic_point(point: Vector2, compact_mos_pin_grid: bool) -> Vector2:
+	if not compact_mos_pin_grid:
+		return point
+
+	return Vector2(point.x - 20.0, point.y * (4.0 / 3.0))

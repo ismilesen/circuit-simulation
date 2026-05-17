@@ -3,14 +3,18 @@
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 function usageAndExit() {
-  console.error("Usage: node scripts/patch_web_export_config.js <index.html> [side-module-path]");
+  console.error("Usage: node scripts/patch_web_export_config.js <index.html> [side-module-path ...]");
   process.exit(1);
 }
 
 const indexHtmlPath = process.argv[2];
-const sideModulePath = process.argv[3] || "libngspice.so";
+const sideModulePaths = process.argv.slice(3);
+if (sideModulePaths.length === 0) {
+  sideModulePaths.push("libngspice.so");
+}
 
 if (!indexHtmlPath) {
   usageAndExit();
@@ -43,12 +47,20 @@ if (!Array.isArray(config.gdextensionLibs)) {
   config.gdextensionLibs = [];
 }
 
-config.gdextensionLibs = config.gdextensionLibs.filter((entry) => {
-  return path.basename(entry) !== path.basename(sideModulePath);
-});
+if (sideModulePaths.some((entry) => path.basename(entry).startsWith("libcircuit_sim.web."))) {
+  config.gdextensionLibs = config.gdextensionLibs.filter((entry) => {
+    return !path.basename(entry).startsWith("libcircuit_sim.web.");
+  });
+}
 
-if (!config.gdextensionLibs.includes(sideModulePath)) {
-  config.gdextensionLibs.push(sideModulePath);
+for (const sideModulePath of sideModulePaths) {
+  config.gdextensionLibs = config.gdextensionLibs.filter((entry) => {
+    return path.basename(entry) !== path.basename(sideModulePath);
+  });
+
+  if (!config.gdextensionLibs.includes(sideModulePath)) {
+    config.gdextensionLibs.push(sideModulePath);
+  }
 }
 
 const replacement = `const GODOT_CONFIG = ${JSON.stringify(config)};`;
@@ -65,6 +77,28 @@ if (!html.includes('src="upload_bridge.js"') && !html.includes("src='upload_brid
 
 fs.writeFileSync(resolvedPath, html);
 
+const exportDir = path.dirname(resolvedPath);
+const serviceWorkerPath = path.join(exportDir, "index.service.worker.js");
+if (fs.existsSync(serviceWorkerPath)) {
+  const hash = crypto.createHash("sha256");
+  for (const file of ["index.html", "index.pck", ...sideModulePaths.map((entry) => path.basename(entry))]) {
+    const filePath = path.join(exportDir, file);
+    if (fs.existsSync(filePath)) {
+      hash.update(file);
+      hash.update(fs.readFileSync(filePath));
+    }
+  }
+
+  let worker = fs.readFileSync(serviceWorkerPath, "utf8");
+  const cacheVersion = `codex-${hash.digest("hex").slice(0, 16)}`;
+  worker = worker.replace(
+    /const CACHE_VERSION = ['"][^'"]+['"];/,
+    `const CACHE_VERSION = '${cacheVersion}';`
+  );
+  fs.writeFileSync(serviceWorkerPath, worker);
+  console.log("Updated service worker CACHE_VERSION:", cacheVersion);
+}
+
 console.log("Updated GODOT_CONFIG.gdextensionLibs in", resolvedPath);
-console.log("Ensured side module preload:", sideModulePath);
+console.log("Ensured side module preload:", sideModulePaths.join(", "));
 console.log("Ensured upload bridge script include: upload_bridge.js");
