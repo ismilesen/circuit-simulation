@@ -240,11 +240,18 @@ jobs:
           const config = JSON.parse(match[1]);
           const libs = Array.isArray(config.gdextensionLibs) ? config.gdextensionLibs : [];
           const circuitLibs = libs.filter((lib) => /^libcircuit_sim\.web\.template_.*\.wasm$/.test(lib));
-          if (circuitLibs.length !== 1) {
-            throw new Error(`Expected exactly 1 libcircuit_sim web side module, found ${circuitLibs.length}: ${JSON.stringify(circuitLibs)}`);
+          if (!circuitLibs.includes("libcircuit_sim.web.template_release.wasm32.wasm")) {
+            throw new Error(`Missing release libcircuit_sim web side module: ${JSON.stringify(circuitLibs)}`);
           }
-          if (circuitLibs[0].includes("nothreads")) {
-            throw new Error(`Threaded export references a non-threaded GDExtension: ${circuitLibs[0]}`);
+          const unexpectedCircuitLibs = circuitLibs.filter((lib) => {
+            return lib !== "libcircuit_sim.web.template_release.wasm32.wasm" &&
+              lib !== "libcircuit_sim.web.template_debug.wasm32.wasm";
+          });
+          if (unexpectedCircuitLibs.length > 0) {
+            throw new Error(`Unexpected libcircuit_sim web side module(s): ${JSON.stringify(unexpectedCircuitLibs)}`);
+          }
+          if (circuitLibs.some((lib) => lib.includes("nothreads"))) {
+            throw new Error(`Threaded export references a non-threaded GDExtension: ${JSON.stringify(circuitLibs)}`);
           }
           if (!libs.includes("libngspice.so")) {
             throw new Error("libngspice.so is missing from gdextensionLibs");
