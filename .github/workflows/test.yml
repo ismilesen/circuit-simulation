@@ -4,12 +4,18 @@ on:
   push:
     branches: [ "**" ]
   workflow_dispatch:
+    inputs:
+      sky130_open_pdks_commit:
+        description: "open_pdks commit hash for the Sky130 Ciel bundle"
+        required: false
+        default: "44a43c23c81b45b8e774ae7a84899a5a778b6b0b"
 
 permissions:
   contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  SKY130_OPEN_PDKS_COMMIT: ${{ github.event.inputs.sky130_open_pdks_commit || '44a43c23c81b45b8e774ae7a84899a5a778b6b0b' }}
 
 jobs:
   build-ngspice-wasm:
@@ -93,6 +99,19 @@ jobs:
       - name: Install SCons
         run: sudo apt-get update && sudo apt-get install -y scons
 
+      - name: Install Ciel
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user --upgrade --no-cache-dir ciel
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/ciel" --version
+
+      - name: Cache Sky130 PDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.ciel
+          key: sky130-ciel-${{ env.SKY130_OPEN_PDKS_COMMIT }}
+
       - name: Download ngspice header
         run: |
           mkdir -p ngspice
@@ -162,6 +181,41 @@ jobs:
       - name: Apply ngspice web post-export setup
         run: ./scripts/enable_ngspice_web_export.sh project/build/web/release ./libngspice-44.2.zip
 
+      - name: Build Sky130 browser PDK bundle
+        run: |
+          set -euo pipefail
+          ciel enable --pdk-family sky130 "$SKY130_OPEN_PDKS_COMMIT"
+          python3 scripts/build_pdk_web_bundle.py \
+            --pdk-root "$HOME/.ciel" \
+            --output project/build/web/release/pdks
+
+      - name: Validate Sky130 browser PDK bundle
+        run: |
+          set -euo pipefail
+          test -f project/build/web/release/pdks/sky130/manifest.json
+          python3 -m json.tool project/build/web/release/pdks/sky130/manifest.json >/dev/null
+          python3 <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest_path = Path("project/build/web/release/pdks/sky130/manifest.json")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          symbols = manifest.get("symbols", [])
+          files = manifest.get("files", [])
+          if not symbols:
+              raise SystemExit("Sky130 browser PDK manifest has no symbols")
+          if not files:
+              raise SystemExit("Sky130 browser PDK manifest has no files")
+          missing = [
+              entry["path"]
+              for entry in files
+              if not (manifest_path.parent / entry["path"]).is_file()
+          ]
+          if missing:
+              raise SystemExit(f"Sky130 browser PDK manifest references missing files: {missing[:10]}")
+          print(f"Validated {len(symbols)} Sky130 symbols and {len(files)} bundled files.")
+          PY
+
       - name: Validate ngspice web packaging
         run: |
           set -euo pipefail
@@ -230,6 +284,7 @@ jobs:
           test -f pages-dist/index.html
           test -f pages-dist/index.pck
           test -f pages-dist/index.wasm
+          test -f pages-dist/pdks/sky130/manifest.json
           
       - name: Upload web release artifact
         uses: actions/upload-artifact@v4

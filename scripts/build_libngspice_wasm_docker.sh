@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_ZIP_INPUT="${1:-$ROOT_DIR/libngspice-44.2.zip}"
+NGSPICE_VERSION="${NGSPICE_VERSION:-44.2}"
+OUT_ZIP_INPUT="${1:-$ROOT_DIR/libngspice-$NGSPICE_VERSION.zip}"
 if [[ "$OUT_ZIP_INPUT" = /* ]]; then
   OUT_ZIP="$OUT_ZIP_INPUT"
 else
@@ -14,6 +15,7 @@ THREADS="${THREADS:-yes}"
 docker run --rm \
   -v "$ROOT_DIR:/work" \
   -w /work \
+  -e NGSPICE_VERSION="$NGSPICE_VERSION" \
   -e THREADS="$THREADS" \
   "$DOCKER_IMAGE" \
   bash -lc '
@@ -32,21 +34,27 @@ docker run --rm \
     mkdir -p .tmp/ngspice-web-build
     cd .tmp/ngspice-web-build
 
-    if [ ! -f ngspice-44.2.zip ]; then
-      curl -L -o ngspice-44.2.zip https://github.com/danchitnis/ngspice-sf-mirror/archive/refs/tags/ngspice-44.2.zip
+    NGSPICE_VERSION="${NGSPICE_VERSION:-44.2}"
+    NGSPICE_ARCHIVE="ngspice-${NGSPICE_VERSION}.tar.gz"
+    NGSPICE_SOURCE_DIR="ngspice-${NGSPICE_VERSION}"
+
+    if [ ! -f "$NGSPICE_ARCHIVE" ]; then
+      curl -L -o "$NGSPICE_ARCHIVE" "https://sourceforge.net/projects/ngspice/files/ng-spice-rework/${NGSPICE_VERSION}/ngspice-${NGSPICE_VERSION}.tar.gz/download"
     fi
 
-    if [ ! -d ngspice-sf-mirror-ngspice-44.2 ]; then
-      unzip -q ngspice-44.2.zip
+    if [ ! -d "$NGSPICE_SOURCE_DIR" ]; then
+      tar -xzf "$NGSPICE_ARCHIVE"
     fi
 
-    cd ngspice-sf-mirror-ngspice-44.2
+    cd "$NGSPICE_SOURCE_DIR"
 
     apply_patch_if_needed /opt/pyodide-recipes/packages/libngspice/patches/0001-keep-alive-API-functions.patch
     apply_patch_if_needed /opt/pyodide-recipes/packages/libngspice/patches/0002-fix-hicum2-extern-c.patch
     apply_patch_if_needed /opt/pyodide-recipes/packages/libngspice/patches/0003-fix-verilog-install-hook.patch
 
-    bash ./autogen.sh
+    if [ -x ./autogen.sh ]; then
+      bash ./autogen.sh
+    fi
 
     if [ ! -x build-native/src/xspice/cmpp/cmpp ]; then
       mkdir -p build-native

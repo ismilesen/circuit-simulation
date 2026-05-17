@@ -17,6 +17,15 @@ static func parse(path: String) -> SymbolDefinition:
 	var all_lines: PackedStringArray = f.get_as_text().split("\n")
 	f.close()
 
+	return parse_text(all_lines)
+
+
+static func parse_string(text: String) -> SymbolDefinition:
+	return parse_text(text.split("\n"))
+
+
+static func parse_text(all_lines: PackedStringArray) -> SymbolDefinition:
+	var symbol = SymbolDefinition.new()
 	var i := 0
 	while i < all_lines.size():
 		var raw_line: String = all_lines[i].strip_edges()

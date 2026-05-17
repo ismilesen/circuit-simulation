@@ -8,6 +8,9 @@
 #include <cctype>
 #include <cstdlib>
 #include <chrono>
+#include <cmath>
+#include <limits>
+#include <map>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -32,6 +35,9 @@ using namespace godot;
 namespace {
 
 constexpr int64_t SIMULATION_DATA_EMIT_STRIDE = 512;
+#ifdef __EMSCRIPTEN__
+constexpr const char *WEB_SKY130_PDK_ROOT = "user://pdks/sky130/models";
+#endif
 
 std::string to_lower_copy(const std::string &s) {
     std::string out = s;
@@ -142,6 +148,10 @@ bool read_file_lines(const fs::path &path, std::vector<std::string> &out) {
     return true;
 }
 
+bool read_file_lines(const std::string &path, std::vector<std::string> &out) {
+    return read_file_lines(fs::path(path), out);
+}
+
 std::string rewrite_include_or_lib(const std::string &line, const fs::path &base_dir,
                                     const std::string &pdk_root) {
     std::string t = trim_copy(line);
@@ -178,10 +188,15 @@ std::string web_dirname(const std::string &path) {
     return pos == std::string::npos ? "." : path.substr(0, pos);
 }
 
+bool has_godot_scheme(const std::string &path) {
+    return path.rfind("user://", 0) == 0 || path.rfind("res://", 0) == 0;
+}
+
 std::string resolve_path_token(const std::string &raw, const std::string &base_dir,
                                 const std::string &pdk_root) {
     std::string expanded = expand_pdk_root(raw, pdk_root);
     if (expanded.empty()) return expanded;
+    if (has_godot_scheme(expanded)) return expanded;
     if (expanded[0] != '/') expanded = base_dir + "/" + expanded;
     return expanded;
 }
@@ -228,6 +243,369 @@ std::string rewrite_input_file_path(const std::string &line, const std::string &
     return line.substr(0, vs) + resolved + line.substr(ve);
 }
 #endif
+
+std::string normalize_sky130_subckt_params(const std::string &line) {
+    std::string t = trim_copy(line);
+    if (t.empty()) return line;
+
+    char first = static_cast<char>(std::tolower(static_cast<unsigned char>(t[0])));
+    if (first != 'x') return line;
+
+    std::string lower = to_lower_copy(line);
+    if (lower.find("sky130_fd_pr__") == std::string::npos) return line;
+    if (lower.find(" w=") == std::string::npos && lower.find(" l=") == std::string::npos) return line;
+
+    std::string normalized = line;
+    if (lower.find(" params:") == std::string::npos) {
+        size_t model_pos = lower.find("sky130_fd_pr__");
+        if (model_pos == std::string::npos) return line;
+        size_t model_end = line.find_first_of(" \t", model_pos);
+        if (model_end == std::string::npos) return line;
+        normalized = line.substr(0, model_end) + " params:" + line.substr(model_end);
+    }
+
+#ifdef __EMSCRIPTEN__
+    // Convert the common Sky130 cell-netlist convention, e.g.
+    // w=1650000u l=150000u, into SI values before browser-side bin selection.
+    std::istringstream iss(normalized);
+    std::ostringstream rebuilt;
+    std::string tok;
+    bool first_tok = true;
+    while (iss >> tok) {
+        std::string out_tok = tok;
+        std::string tok_lower = to_lower_copy(tok);
+        bool is_dimension = tok_lower.rfind("w=", 0) == 0 || tok_lower.rfind("l=", 0) == 0;
+        if (is_dimension && !tok_lower.empty() && tok_lower.back() == 'u') {
+            std::string key = tok.substr(0, 2);
+            std::string number = tok.substr(2, tok.size() - 3);
+            char *end_ptr = nullptr;
+            double value = std::strtod(number.c_str(), &end_ptr);
+            if (end_ptr != number.c_str() && *end_ptr == '\0' && value >= 1000.0) {
+                std::ostringstream value_stream;
+                value_stream << (value * 1e-12);
+                out_tok = key + value_stream.str();
+            }
+        }
+        if (!first_tok) rebuilt << ' ';
+        rebuilt << out_tok;
+        first_tok = false;
+    }
+    return rebuilt.str();
+#else
+    return normalized;
+#endif
+}
+
+#ifdef __EMSCRIPTEN__
+struct Sky130ModelBin {
+    std::string name;
+    std::string definition_line;
+    int index = 0;
+    double lmin = 0.0;
+    double lmax = 0.0;
+    double wmin = 0.0;
+    double wmax = 0.0;
+    bool has_bounds = false;
+};
+
+using Sky130ModelBins = std::map<std::string, std::vector<Sky130ModelBin>>;
+
+std::vector<std::string> split_tokens(const std::string &line) {
+    std::vector<std::string> tokens;
+    std::istringstream iss(line);
+    std::string tok;
+    while (iss >> tok) tokens.push_back(tok);
+    return tokens;
+}
+
+bool parse_spice_number(const std::string &token, double &out) {
+    std::string value = trim_copy(token);
+    if (value.empty()) return false;
+
+    char suffix = static_cast<char>(std::tolower(static_cast<unsigned char>(value.back())));
+    double scale = 1.0;
+    bool has_suffix = true;
+    switch (suffix) {
+        case 'f': scale = 1e-15; break;
+        case 'p': scale = 1e-12; break;
+        case 'n': scale = 1e-9; break;
+        case 'u': scale = 1e-6; break;
+        case 'm': scale = 1e-3; break;
+        case 'k': scale = 1e3; break;
+        case 'g': scale = 1e9; break;
+        case 't': scale = 1e12; break;
+        default: has_suffix = false; break;
+    }
+    if (has_suffix) value.pop_back();
+
+    char *end_ptr = nullptr;
+    double parsed = std::strtod(value.c_str(), &end_ptr);
+    if (end_ptr == value.c_str() || *end_ptr != '\0') return false;
+    out = parsed * scale;
+    return true;
+}
+
+bool extract_param_value(const std::vector<std::string> &tokens, const std::string &key,
+                         double &out, size_t start = 0) {
+    std::string key_lower = to_lower_copy(key);
+    for (size_t i = start; i < tokens.size(); i++) {
+        std::string tok = tokens[i];
+        while (!tok.empty() && (tok.back() == ',' || tok.back() == ')')) tok.pop_back();
+        std::string lower = to_lower_copy(tok);
+        std::string prefix = key_lower + "=";
+        if (lower.rfind(prefix, 0) == 0) {
+            return parse_spice_number(tok.substr(prefix.size()), out);
+        }
+        if (lower == key_lower && i + 2 < tokens.size() && tokens[i + 1] == "=") {
+            return parse_spice_number(tokens[i + 2], out);
+        }
+    }
+    return false;
+}
+
+Sky130ModelBins collect_sky130_model_bins(const std::vector<std::string> &lines) {
+    Sky130ModelBins bins;
+    for (const std::string &line : lines) {
+        std::string t = trim_copy(line);
+        std::string lower = to_lower_copy(t);
+        if (!starts_with_ci(lower, ".model")) continue;
+
+        std::vector<std::string> tokens = split_tokens(t);
+        if (tokens.size() < 3) continue;
+
+        std::string model_name = tokens[1];
+        std::string model_lower = to_lower_copy(model_name);
+        if (model_lower.find("sky130_fd_pr__") == std::string::npos ||
+            model_lower.find("__model.") == std::string::npos) {
+            continue;
+        }
+
+        size_t dot_pos = model_name.rfind('.');
+        if (dot_pos == std::string::npos || dot_pos + 1 >= model_name.size()) continue;
+
+        char *end_ptr = nullptr;
+        long index = std::strtol(model_name.c_str() + dot_pos + 1, &end_ptr, 10);
+        if (*end_ptr != '\0') continue;
+
+        Sky130ModelBin bin;
+        bin.name = model_name;
+        bin.definition_line = t;
+        bin.index = static_cast<int>(index);
+        bin.has_bounds =
+            extract_param_value(tokens, "lmin", bin.lmin, 3) &&
+            extract_param_value(tokens, "lmax", bin.lmax, 3) &&
+            extract_param_value(tokens, "wmin", bin.wmin, 3) &&
+            extract_param_value(tokens, "wmax", bin.wmax, 3);
+
+        bins[model_name.substr(0, dot_pos)].push_back(bin);
+    }
+
+    for (auto &entry : bins) {
+        std::sort(entry.second.begin(), entry.second.end(),
+            [](const Sky130ModelBin &a, const Sky130ModelBin &b) {
+                return a.index < b.index;
+            });
+    }
+    return bins;
+}
+
+const Sky130ModelBin *select_sky130_model_bin(const std::vector<Sky130ModelBin> &bins,
+                                              double w, double l) {
+    constexpr double eps = 1e-15;
+    for (const Sky130ModelBin &bin : bins) {
+        if (!bin.has_bounds) continue;
+        if (l + eps >= bin.lmin && l - eps <= bin.lmax &&
+            w + eps >= bin.wmin && w - eps <= bin.wmax) {
+            return &bin;
+        }
+    }
+
+    const Sky130ModelBin *best = nullptr;
+    double best_score = std::numeric_limits<double>::infinity();
+    for (const Sky130ModelBin &bin : bins) {
+        if (!bin.has_bounds) {
+            if (!best) best = &bin;
+            continue;
+        }
+        double l_center = (bin.lmin + bin.lmax) * 0.5;
+        double w_center = (bin.wmin + bin.wmax) * 0.5;
+        double l_scale = std::max(std::abs(l_center), 1e-15);
+        double w_scale = std::max(std::abs(w_center), 1e-15);
+        double score = std::abs((l - l_center) / l_scale) +
+                       std::abs((w - w_center) / w_scale);
+        if (score < best_score) {
+            best_score = score;
+            best = &bin;
+        }
+    }
+    return best;
+}
+
+std::string rewrite_sky130_mos_instance_for_web(const std::string &line,
+                                                const Sky130ModelBins &bins,
+                                                std::map<std::string, std::string> &selected_models,
+                                                int &rewrite_count) {
+    std::string t = trim_copy(line);
+    if (t.empty() || std::tolower(static_cast<unsigned char>(t[0])) != 'x') return line;
+
+    std::vector<std::string> tokens = split_tokens(line);
+    if (tokens.size() < 7) return line;
+
+    size_t model_pos = std::string::npos;
+    for (size_t i = 1; i < tokens.size(); i++) {
+        std::string lower = to_lower_copy(tokens[i]);
+        if (lower.rfind("sky130_fd_pr__", 0) == 0 &&
+            (lower.find("nfet") != std::string::npos || lower.find("pfet") != std::string::npos)) {
+            model_pos = i;
+            break;
+        }
+    }
+    if (model_pos == std::string::npos || model_pos < 5) return line;
+
+    std::string base_model = tokens[model_pos] + "__model";
+    auto found = bins.find(base_model);
+    if (found == bins.end() || found->second.empty()) return line;
+
+    double w = 0.0;
+    double l = 0.0;
+    if (!extract_param_value(tokens, "w", w, model_pos + 1) ||
+        !extract_param_value(tokens, "l", l, model_pos + 1)) {
+        return line;
+    }
+
+    const Sky130ModelBin *selected = select_sky130_model_bin(found->second, w, l);
+    if (!selected) return line;
+    if (!selected->definition_line.empty()) selected_models[selected->name] = selected->definition_line;
+
+    std::map<std::string, std::string> params = {
+        {"w", ""}, {"l", ""}, {"ad", "0"}, {"as", "0"},
+        {"pd", "0"}, {"ps", "0"}, {"nrd", "0"}, {"nrs", "0"}
+    };
+
+    for (size_t i = model_pos + 1; i < tokens.size(); i++) {
+        std::string tok = tokens[i];
+        size_t eq = tok.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = to_lower_copy(tok.substr(0, eq));
+        if (params.find(key) != params.end()) params[key] = tok.substr(eq + 1);
+    }
+
+    std::ostringstream rebuilt;
+    std::string instance = tokens[0];
+    instance[0] = 'M';
+    rebuilt << instance << ' '
+            << tokens[model_pos - 4] << ' '
+            << tokens[model_pos - 3] << ' '
+            << tokens[model_pos - 2] << ' '
+            << tokens[model_pos - 1] << ' '
+            << selected->name;
+
+    for (const std::string &key : {"l", "w", "ad", "as", "pd", "ps", "nrd", "nrs"}) {
+        if (!params[key].empty()) rebuilt << ' ' << key << '=' << params[key];
+    }
+
+    rewrite_count++;
+    return rebuilt.str();
+}
+#endif
+
+std::vector<std::string> extract_lib_section(const std::vector<std::string> &lines,
+                                             const std::string &section) {
+    std::vector<std::string> extracted;
+    bool inside = false;
+    for (const std::string &line : lines) {
+        std::string t = trim_copy(line);
+        if (starts_with_ci(t, ".lib")) {
+            std::istringstream iss(t);
+            std::string directive, current_section;
+            iss >> directive >> current_section;
+            if (current_section == section) inside = true;
+            continue;
+        }
+        if (inside && starts_with_ci(t, ".endl")) {
+            break;
+        }
+        if (inside) extracted.push_back(line);
+    }
+    return extracted;
+}
+
+#ifndef __EMSCRIPTEN__
+std::string dirname_for_path(const std::string &path) {
+    return fs::path(path).parent_path().string();
+}
+
+std::string resolve_include_path(const std::string &raw, const fs::path &base_dir,
+                                 const std::string &pdk_root) {
+    return resolve_path_token(raw, base_dir, pdk_root);
+}
+
+std::string resolve_include_path(const std::string &raw, const std::string &base_dir,
+                                 const std::string &pdk_root) {
+    return resolve_path_token(raw, fs::path(base_dir), pdk_root);
+}
+#else
+std::string dirname_for_path(const std::string &path) {
+    return web_dirname(path);
+}
+
+std::string resolve_include_path(const std::string &raw, const std::string &base_dir,
+                                 const std::string &pdk_root) {
+    return resolve_path_token(raw, base_dir, pdk_root);
+}
+#endif
+
+template <typename BaseDir>
+void expand_includes_recursive(const std::vector<std::string> &logical_lines,
+                               const BaseDir &base_dir,
+                               const std::string &pdk_root,
+                               std::vector<std::string> &out,
+                               int depth) {
+    if (depth > 32) {
+        out.push_back("* ERROR: maximum include depth exceeded");
+        return;
+    }
+
+    for (const std::string &orig : logical_lines) {
+        std::string t = trim_copy(orig);
+        std::string l = to_lower_copy(t);
+        bool is_include = starts_with_ci(l, ".include");
+        bool is_lib = starts_with_ci(l, ".lib");
+        if (!is_include && !is_lib) {
+            out.push_back(orig);
+            continue;
+        }
+
+        std::istringstream iss(t);
+        std::string directive, path_tok, section;
+        iss >> directive >> path_tok;
+        if (path_tok.empty()) {
+            out.push_back(orig);
+            continue;
+        }
+        if (is_lib) iss >> section;
+
+        std::string resolved = resolve_include_path(unquote_copy(path_tok), base_dir, pdk_root);
+        std::vector<std::string> child_physical;
+        if (!read_file_lines(resolved, child_physical)) {
+            out.push_back(orig);
+            continue;
+        }
+
+        std::vector<std::string> child_logical = to_logical_lines(child_physical);
+        if (is_lib && !section.empty()) {
+            child_logical = extract_lib_section(child_logical, section);
+            if (child_logical.empty()) {
+                out.push_back("* WARNING: empty .lib section " + section + " from " + resolved);
+                continue;
+            }
+        }
+
+        out.push_back("* begin expanded " + directive + " " + resolved);
+        expand_includes_recursive(child_logical, dirname_for_path(resolved), pdk_root, out, depth + 1);
+        out.push_back("* end expanded " + directive + " " + resolved);
+    }
+}
 
 } // namespace
 
@@ -472,6 +850,8 @@ bool CircuitSimulator::run_continuous(const String &spice_path, const String &pd
     fs::path fs_path = fs::absolute(fs::path(path_str)).lexically_normal();
     fs::path base_dir = fs_path.parent_path();
 #else
+    pdk_root_str = WEB_SKY130_PDK_ROOT;
+    UtilityFunctions::print("CircuitSimulator: using fixed web Sky130 PDK_ROOT " + String(pdk_root_str.c_str()));
     std::string fs_path = path_str;
     std::string base_dir = web_dirname(path_str);
 #endif
@@ -483,12 +863,21 @@ bool CircuitSimulator::run_continuous(const String &spice_path, const String &pd
     }
 
     std::vector<std::string> logical = to_logical_lines(physical_lines);
+    std::vector<std::string> expanded_lines;
+    expand_includes_recursive(logical, base_dir, pdk_root_str, expanded_lines, 0);
+
+#ifdef __EMSCRIPTEN__
+    Sky130ModelBins sky130_model_bins = collect_sky130_model_bins(expanded_lines);
+    std::map<std::string, std::string> sky130_selected_model_lines;
+    int sky130_model_rewrite_count = 0;
+#endif
+
     std::vector<std::string> out_lines;
     bool inside_control = false;
     bool has_end        = false;
     bool has_tran       = false;
 
-    for (const std::string &orig : logical) {
+    for (const std::string &orig : expanded_lines) {
         std::string t = trim_copy(orig);
         std::string l = to_lower_copy(t);
 
@@ -500,27 +889,80 @@ bool CircuitSimulator::run_continuous(const String &spice_path, const String &pd
 
         std::string line = rewrite_include_or_lib(orig, base_dir, pdk_root_str);
         line = rewrite_input_file_path(line, base_dir, pdk_root_str);
+        line = normalize_sky130_subckt_params(line);
+#ifdef __EMSCRIPTEN__
+        line = rewrite_sky130_mos_instance_for_web(line, sky130_model_bins, sky130_selected_model_lines,
+                                                   sky130_model_rewrite_count);
+#endif
 
         std::string lt = to_lower_copy(trim_copy(line));
+#ifdef __EMSCRIPTEN__
+        if (starts_with_ci(lt, ".save") || starts_with_ci(lt, ".print")) {
+            UtilityFunctions::print("CircuitSimulator: web omitted storage/output directive " + String(line.c_str()));
+            continue;
+        }
+#endif
         if (lt == ".end") { has_end = true; out_lines.push_back(line); continue; }
 
         if (starts_with_ci(lt, ".tran")) {
             has_tran = true;
+#ifdef __EMSCRIPTEN__
+            std::istringstream iss(t);
+            std::string directive, step_tok;
+            iss >> directive >> step_tok;
+            if (step_tok.empty()) step_tok = "1n";
+            std::string continuous_tran = ".tran " + step_tok + " 1e12";
+            out_lines.push_back(continuous_tran);
+            UtilityFunctions::print("CircuitSimulator: web continuous transient command " +
+                                    String(continuous_tran.c_str()) +
+                                    " (source: " + String(line.c_str()) + ")");
+#else
             std::istringstream iss(t);
             std::string directive, step_tok;
             iss >> directive >> step_tok;
             if (step_tok.empty()) step_tok = "1n";
             out_lines.push_back(".tran " + step_tok + " 1e12");
+#endif
             continue;
         }
         out_lines.push_back(line);
     }
 
     if (!has_tran) {
+#ifdef __EMSCRIPTEN__
+        if (has_end) out_lines.insert(out_lines.end() - 1, ".tran 1n 1e12");
+        else         out_lines.push_back(".tran 1n 1e12");
+        UtilityFunctions::print("CircuitSimulator: web inserted default continuous transient command .tran 1n 1e12");
+#else
         if (has_end) out_lines.insert(out_lines.end() - 1, ".tran 1n 1000");
         else         out_lines.push_back(".tran 1n 1e12");
+#endif
     }
     if (!has_end) out_lines.push_back(".end");
+
+#ifdef __EMSCRIPTEN__
+    if (!sky130_selected_model_lines.empty()) {
+        std::vector<std::string> promoted_models;
+        promoted_models.reserve(sky130_selected_model_lines.size() + 1);
+        promoted_models.push_back("* browser-promoted Sky130 model bins");
+        for (const auto &entry : sky130_selected_model_lines) {
+            promoted_models.push_back(entry.second);
+        }
+
+        auto end_it = std::find_if(out_lines.begin(), out_lines.end(), [](const std::string &line) {
+            return to_lower_copy(trim_copy(line)) == ".end";
+        });
+        out_lines.insert(end_it, promoted_models.begin(), promoted_models.end());
+    }
+
+    if (sky130_model_rewrite_count > 0) {
+        UtilityFunctions::print("CircuitSimulator: selected explicit Sky130 model bins for " +
+                                String::num_int64(sky130_model_rewrite_count) +
+                                " browser MOS instance(s); promoted " +
+                                String::num_int64(static_cast<int64_t>(sky130_selected_model_lines.size())) +
+                                " model definition(s)");
+    }
+#endif
 
     std::vector<char*> circ;
     circ.reserve(out_lines.size() + 1);
@@ -535,6 +977,30 @@ bool CircuitSimulator::run_continuous(const String &spice_path, const String &pd
         UtilityFunctions::printerr("ngSpice_Circ failed — check deck errors above");
         return false;
     }
+
+#ifndef __EMSCRIPTEN__
+    int esave_result = ng_Command((char*)"esave node");
+    UtilityFunctions::print("CircuitSimulator: ngspice command esave node -> " + String::num_int64(esave_result));
+    if (esave_result != 0) {
+        UtilityFunctions::printerr("ngspice esave node failed");
+    }
+    int save_none_result = ng_Command((char*)"save none");
+    UtilityFunctions::print("CircuitSimulator: ngspice command save none -> " + String::num_int64(save_none_result));
+    if (save_none_result != 0) {
+        UtilityFunctions::printerr("ngspice save none failed");
+    }
+#else
+    int esave_result = ngSpice_Command((char*)"esave node");
+    UtilityFunctions::print("CircuitSimulator: ngspice command esave node -> " + String::num_int64(esave_result));
+    if (esave_result != 0) {
+        UtilityFunctions::printerr("ngspice esave node failed");
+    }
+    int save_none_result = ngSpice_Command((char*)"save none");
+    UtilityFunctions::print("CircuitSimulator: ngspice command save none -> " + String::num_int64(save_none_result));
+    if (save_none_result != 0) {
+        UtilityFunctions::printerr("ngspice save none failed");
+    }
+#endif
 
     continuous_sample_count.store(0);
     continuous_stop_requested = false;

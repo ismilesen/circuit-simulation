@@ -15,10 +15,10 @@ func _init(vis) -> void:
 
 # ---------- Top-level circuit draw ----------
 
-func draw_circuit(parser, floor: MeshInstance3D) -> void:
+func draw_circuit(parser, floor_: MeshInstance3D) -> void:
 	# Clear previous children (keep the floor).
 	for child in _vis.get_children():
-		if child == floor:
+		if child == floor_:
 			continue
 		child.queue_free()
 
@@ -238,6 +238,17 @@ func resolve_sym_path(symbol_name: String) -> String:
 	var found: String = find_sym_recursive("res://symbols", basename)
 	if found != "":
 		return found
+
+	if _vis._pdk_manifest != null and _vis._pdk_manifest.has_method("get_symbol_for_file"):
+		var symbol: Dictionary = _vis._pdk_manifest.get_symbol_for_file(basename)
+		if not symbol.is_empty():
+			var pdk_filename := str(symbol.get("symbol_path", "")).get_file()
+			for cached_name: String in [basename, pdk_filename, "%s.sym" % str(symbol.get("id", ""))]:
+				if cached_name == "":
+					continue
+				var cached_path := "user://pdk_symbols/" + cached_name
+				if FileAccess.file_exists(cached_path):
+					return cached_path
 
 	push_warning("SymParser: .sym file not found for: " + symbol_name)
 	return ""

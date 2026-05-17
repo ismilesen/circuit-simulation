@@ -31,19 +31,19 @@ static func build_materials() -> Dictionary:
 
 ## Creates and adds the floor plane to parent, returns the MeshInstance3D.
 static func create_floor(parent: Node3D) -> MeshInstance3D:
-	var floor := MeshInstance3D.new()
+	var floor_ := MeshInstance3D.new()
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(50, 50)
-	floor.mesh = plane
-	floor.position = Vector3(0, -0.01, 0)
+	floor_.mesh = plane
+	floor_.position = Vector3(0, -0.01, 0)
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = Color(0.08, 0.08, 0.12)
 	mat.metallic = 0.2
 	mat.roughness = 0.8
-	floor.material_override = mat
-	floor.name = "Floor"
-	parent.add_child(floor)
-	return floor
+	floor_.material_override = mat
+	floor_.name = "Floor"
+	parent.add_child(floor_)
+	return floor_
 
 
 ## Returns the material for type, falling back to "unknown".

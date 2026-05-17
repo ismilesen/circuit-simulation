@@ -9,6 +9,8 @@ NGSPICE_DIR="$EXPORT_DIR/ngspice"
 NGSPICE_LIB="$NGSPICE_DIR/libngspice.so"
 NGSPICE_ROOT_LIB="$EXPORT_DIR/libngspice.so"
 NGSPICE_PRELOAD_PATH="libngspice.so"
+CIRCUIT_RELEASE_LIB="libcircuit_sim.web.template_release.wasm32.wasm"
+CIRCUIT_DEBUG_LIB="libcircuit_sim.web.template_debug.wasm32.wasm"
 
 if [ ! -f "$INDEX_HTML" ]; then
   echo "ERROR: Export HTML not found: $INDEX_HTML" >&2
@@ -55,10 +57,34 @@ while IFS= read -r cm_file; do
   cp "$cm_file" "$NGSPICE_DIR/lib/ngspice/"
 done < <(find "$tmp_unpack" -type f -name "*.cm" | sort)
 
-cp "$ROOT_DIR/project/web/upload_bridge.js" "$EXPORT_DIR/upload_bridge.js"
-cp "$ROOT_DIR/project/web/server.js" "$EXPORT_DIR/server.js"
+UPLOAD_BRIDGE_SRC="$ROOT_DIR/project/web/upload_bridge.js"
+SERVER_SRC="$ROOT_DIR/project/web/server.js"
+if [ ! -f "$UPLOAD_BRIDGE_SRC" ]; then
+  UPLOAD_BRIDGE_SRC="$ROOT_DIR/src/web/shell/upload_bridge.js"
+fi
+if [ ! -f "$SERVER_SRC" ]; then
+  SERVER_SRC="$ROOT_DIR/src/web/shell/server.js"
+fi
+cp "$UPLOAD_BRIDGE_SRC" "$EXPORT_DIR/upload_bridge.js"
+cp "$SERVER_SRC" "$EXPORT_DIR/server.js"
 
-node "$ROOT_DIR/scripts/patch_web_export_config.js" "$INDEX_HTML" "$NGSPICE_PRELOAD_PATH"
+for circuit_lib in "$CIRCUIT_RELEASE_LIB" "$CIRCUIT_DEBUG_LIB"; do
+  if [ -f "$ROOT_DIR/project/bin/$circuit_lib" ]; then
+    cp "$ROOT_DIR/project/bin/$circuit_lib" "$EXPORT_DIR/$circuit_lib"
+  fi
+done
+
+CIRCUIT_PRELOAD_PATHS=()
+if [ -f "$EXPORT_DIR/$CIRCUIT_RELEASE_LIB" ]; then
+  CIRCUIT_PRELOAD_PATHS+=("$CIRCUIT_RELEASE_LIB")
+fi
+if [ -f "$EXPORT_DIR/$CIRCUIT_DEBUG_LIB" ]; then
+  CIRCUIT_PRELOAD_PATHS+=("$CIRCUIT_DEBUG_LIB")
+fi
+
+SIDE_MODULES=("${CIRCUIT_PRELOAD_PATHS[@]}" "$NGSPICE_PRELOAD_PATH")
+
+node "$ROOT_DIR/scripts/patch_web_export_config.js" "$INDEX_HTML" "${SIDE_MODULES[@]}"
 
 if [ ! -f "$NGSPICE_LIB" ]; then
   echo "ERROR: ngspice side module copy failed: $NGSPICE_LIB" >&2

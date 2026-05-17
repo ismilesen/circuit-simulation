@@ -28,6 +28,7 @@ const MIME_TYPES = {
   ".css": "text/css",
   ".json": "application/json",
   ".sch": "text/plain",
+  ".sym": "text/plain",
   ".spice": "text/plain",
   ".cir": "text/plain",
   ".net": "text/plain",
@@ -51,10 +52,8 @@ const server = http.createServer((req, res) => {
 
     res.writeHead(200, {
       "Content-Type": contentType,
-      // Required for SharedArrayBuffer (threads, GDExtensions with dlink_enabled).
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "require-corp",
-      // Prevent caching during dev so refreshes pick up new builds.
       "Cache-Control": "no-cache, no-store, must-revalidate",
     });
     res.end(data);

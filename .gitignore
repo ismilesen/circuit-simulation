@@ -4,6 +4,7 @@
 *.import
 
 # Build artifacts
+__pycache__/
 *.obj
 *.o
 *.dll
@@ -32,6 +33,7 @@ project/web/index*
 project/web/*.import
 project/web/libcircuit_sim*.wasm
 project/web/version.txt
+project/web/pdks/
 
 # OS
 .DS_Store
