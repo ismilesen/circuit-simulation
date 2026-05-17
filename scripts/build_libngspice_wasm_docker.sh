@@ -35,15 +35,17 @@ docker run --rm \
     cd .tmp/ngspice-web-build
 
     NGSPICE_VERSION="${NGSPICE_VERSION:-44.2}"
-    NGSPICE_ARCHIVE="ngspice-${NGSPICE_VERSION}.tar.gz"
-    NGSPICE_SOURCE_DIR="ngspice-${NGSPICE_VERSION}"
+    NGSPICE_ARCHIVE="ngspice-${NGSPICE_VERSION}.zip"
+    NGSPICE_SOURCE_DIR="ngspice-sf-mirror-ngspice-${NGSPICE_VERSION}"
 
     if [ ! -f "$NGSPICE_ARCHIVE" ]; then
-      curl -L -o "$NGSPICE_ARCHIVE" "https://sourceforge.net/projects/ngspice/files/ng-spice-rework/${NGSPICE_VERSION}/ngspice-${NGSPICE_VERSION}.tar.gz/download"
+      curl -fL --retry 3 --retry-delay 2 \
+        -o "$NGSPICE_ARCHIVE" \
+        "https://github.com/danchitnis/ngspice-sf-mirror/archive/refs/tags/ngspice-${NGSPICE_VERSION}.zip"
     fi
 
     if [ ! -d "$NGSPICE_SOURCE_DIR" ]; then
-      tar -xzf "$NGSPICE_ARCHIVE"
+      unzip -q "$NGSPICE_ARCHIVE"
     fi
 
     cd "$NGSPICE_SOURCE_DIR"
