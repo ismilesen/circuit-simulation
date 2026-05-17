@@ -1,7 +1,7 @@
 [gd_scene format=3 uid="uid://bnc58wnbljdmh"]
 
-[ext_resource type="Script" uid="uid://b8uy6u4pdf4ee" path="res://visualizer/3Dschvisualizer.gd" id="1_eaxk8"]
-[ext_resource type="Script" uid="uid://43c73jde1vw0" path="res://camera/camera_3d.gd" id="2_eaxk8"]
+[ext_resource type="Script" uid="uid://bbob6fhobdxtp" path="res://visualizer/3Dschvisualizer.gd" id="1_eaxk8"]
+[ext_resource type="Script" uid="uid://b4rg35fkhfjx3" path="res://camera/camera_3d.gd" id="2_eaxk8"]
 
 [sub_resource type="Environment" id="Environment_1"]
 background_mode = 1
@@ -21,11 +21,6 @@ current = true
 fov = 39.0
 far = 2989.91
 script = ExtResource("2_eaxk8")
-
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1008220504]
-transform = Transform3D(1, 0, 0, 0, 0.707107, 0.707107, 0, -0.707107, 0.707107, 0, 5, 5)
-light_energy = 0.8
-shadow_enabled = true
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=371790493]
 environment = SubResource("Environment_1")
