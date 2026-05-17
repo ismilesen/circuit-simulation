@@ -219,14 +219,35 @@ jobs:
       - name: Validate ngspice web packaging
         run: |
           set -euo pipefail
-          test -f project/build/web/release/upload_bridge.js
-          test -f project/build/web/release/server.js
-          test -f project/build/web/release/index.service.worker.js
-          test -f project/build/web/release/libngspice.so
-          test -f project/build/web/release/ngspice/libngspice.so
-          grep -Eq 'libngspice\.so' project/build/web/release/index.html
-          grep -Eq '"serviceWorker":"index\.service\.worker\.js"' project/build/web/release/index.html
-          grep -Eq 'const GODOT_THREADS_ENABLED = true;' project/build/web/release/index.html
+          EXPORT_DIR="project/build/web/release"
+          require_file() {
+            if [ ! -f "$1" ]; then
+              echo "ERROR: expected export file is missing: $1"
+              echo "Export directory contents:"
+              find "$EXPORT_DIR" -maxdepth 2 -type f | sort
+              exit 1
+            fi
+          }
+          require_pattern() {
+            local pattern="$1"
+            local file="$2"
+            local description="$3"
+            if ! grep -Eq "$pattern" "$file"; then
+              echo "ERROR: missing $description in $file"
+              exit 1
+            fi
+          }
+          require_file "$EXPORT_DIR/index.html"
+          require_file "$EXPORT_DIR/upload_bridge.js"
+          require_file "$EXPORT_DIR/server.js"
+          require_file "$EXPORT_DIR/libngspice.so"
+          require_file "$EXPORT_DIR/ngspice/libngspice.so"
+          require_pattern 'libngspice\.so' "$EXPORT_DIR/index.html" "libngspice preload"
+          require_pattern 'const GODOT_THREADS_ENABLED = true;' "$EXPORT_DIR/index.html" "threaded Godot export flag"
+          if grep -Eq '^progressive_web_app/enabled=true$' project/export_presets.cfg; then
+            require_file "$EXPORT_DIR/index.service.worker.js"
+            require_pattern '"serviceWorker":"index\.service\.worker\.js"' "$EXPORT_DIR/index.html" "service worker config"
+          fi
           if find project/build/web/release -maxdepth 1 -type f -name 'libcircuit_sim.web.*.nothreads.wasm' | grep -q .; then
             echo "ERROR: web export contains stale .nothreads wasm artifacts"
             find project/build/web/release -maxdepth 1 -type f -name 'libcircuit_sim.web.*.wasm' -print
