@@ -13,7 +13,7 @@ const WORKSPACE_MANIFEST := "manifest.json"
 const WORKSPACE_FILES_DIR := "files/"
 const WEB_PDK_CACHE_ROOT := "user://pdks/sky130"
 
-var NETLIST_EXTS: PackedStringArray = PackedStringArray(["spice", "cir", "net", "txt"])
+var NETLIST_EXTS: PackedStringArray = PackedStringArray(["spice", "cir", "net", "txt", "lib", "model", "mod"])
 var SCHEMATIC_EXTS: PackedStringArray = PackedStringArray(["sch"])
 var SYMBOL_EXTS: PackedStringArray = PackedStringArray(["sym"])
 var XSCHEM_EXTS: PackedStringArray = PackedStringArray(["sch", "sym"])
@@ -49,6 +49,7 @@ var SYMBOL_DIRS: PackedStringArray = PackedStringArray(["res://symbols", "res://
 #   "complete" : bool
 # -------------------------------------------------------------------
 var projects: Array[Dictionary] = []
+var support_files: Array[Dictionary] = []
 
 var _pending_slot_project: int = -1
 var _pending_slot_key: String = ""
@@ -90,6 +91,7 @@ var _pdk_models_ready: bool = false
 var _pdk_model_request: HTTPRequest = null
 
 var _external_re: RegEx = null
+var _include_re: RegEx = null
 
 # -------------------------------------------------------------------
 # Ready
@@ -106,7 +108,7 @@ func _ready() -> void:
 	file_dialog.use_native_dialog = true
 	file_dialog.clear_filters()
 	file_dialog.add_filter("*.sch, *.sym ; Xschem schematics/symbols")
-	file_dialog.add_filter("*.spice, *.cir, *.net, *.txt ; Existing SPICE netlists")
+	file_dialog.add_filter("*.spice, *.cir, *.net, *.txt, *.lib, *.model, *.mod ; SPICE netlists/models")
 	file_dialog.add_filter("* ; All files")
 
 	upload_button.pressed.connect(Callable(self, "_on_upload_pressed"))
@@ -121,6 +123,12 @@ func _ready() -> void:
 	workspace_dialog.file_selected.connect(Callable(self, "_on_workspace_dialog_file_selected"))
 
 	output_box.bbcode_enabled = true
+	output_box.custom_minimum_size = Vector2(0, 120)
+	output_box.fit_content = false
+	output_box.scroll_active = true
+	output_box.scroll_following = true
+	output_box.mouse_filter = Control.MOUSE_FILTER_STOP
+	output_box.gui_input.connect(Callable(self, "_on_output_box_gui_input"))
 	output_box.add_theme_color_override("default_color", Color(0.10, 0.10, 0.10, 1))
 
 	if not OS.has_feature("web"):
@@ -130,6 +138,8 @@ func _ready() -> void:
 
 	_external_re = RegEx.new()
 	_external_re.compile("(?i)\\bexternal\\b")
+	_include_re = RegEx.new()
+	_include_re.compile("(?i)^\\s*\\.(include|lib)\\s+([^\\s]+)")
 
 	_sim = _resolve_simulator()
 	_refresh_status("idle", StatusTone.IDLE)
@@ -335,9 +345,6 @@ func _on_native_files_selected(paths: PackedStringArray) -> void:
 		if schematic_paths.size() > 1:
 			_set_error("Please select at most one schematic file (.sch) at a time.")
 			return
-		if spice_paths.size() > 1:
-			_set_error("Please select at most one netlist/spice file at a time.")
-			return
 
 	var added := 0
 	for p in schematic_paths:
@@ -422,13 +429,17 @@ func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
 	elif SYMBOL_EXTS.has(ext):
 		_log("[color=#336699][b]Info:[/b][/color] Added symbol file for xschem2spice lookup.")
 	elif NETLIST_EXTS.has(ext):
-		if ext == "spice" and _spice_has_subckt(user_path):
-			_set_error("Contains .subckt")
+		var analysis := _analyze_spice_file(user_path)
+		slot["spice_analysis"] = analysis
+		if _should_stage_as_support_file(slot, analysis):
+			_assign_support_file(slot)
 		_assign_spice(slot)
 	else:
 		_log("[color=#b56a00][b]Warning:[/b][/color] Unrecognised extension '%s', skipped." % ext)
 		return false
 
+	_rebuild_cards()
+	_recheck_all_project_dependencies(true)
 	_rebuild_cards()
 	_log("[color=#336699][b]Info:[/b][/color] Staged %s (%d bytes) -> %s" % [
 		safe_name,
@@ -448,7 +459,7 @@ func _assign_spice(slot: Dictionary) -> void:
 		if str(proj.get("name", "")) != basename:
 			continue
 		proj["spice"] = slot
-		proj["complete"] = proj["xschem"] != null
+		proj["complete"] = true
 		projects[i] = proj
 		_selected_project = i
 		spice_paired.emit(str(slot.get("user_path", "")))
@@ -459,24 +470,282 @@ func _assign_spice(slot: Dictionary) -> void:
 		"name": basename,
 		"xschem": null,
 		"spice": slot,
-		"complete": false,
+		"complete": true,
 		"buttons": [],
 		"switch_states": {}
 	})
 	spice_paired.emit(str(slot.get("user_path", "")))
 
-# checks .spice for ".subckt"
-func _spice_has_subckt(path: String) -> bool:
-	var f := FileAccess.open(path, FileAccess.READ)
-	if f == null:
+func _assign_support_file(slot: Dictionary) -> void:
+	var path := str(slot.get("user_path", ""))
+	for i in support_files.size():
+		if str((support_files[i] as Dictionary).get("display", "")) == str(slot.get("display", "")):
+			support_files[i] = slot
+			_log("[color=#336699][b]Info:[/b][/color] Replaced support file %s." % str(slot.get("display", "")))
+			return
+	support_files.append(slot)
+	_log("[color=#336699][b]Info:[/b][/color] Added support SPICE/model file %s." % path)
+
+func _should_stage_as_support_file(slot: Dictionary, analysis: Dictionary) -> bool:
+	if _pending_slot_project >= 0:
 		return false
-	while not f.eof_reached():
-		var line := f.get_line().strip_edges().to_lower()
-		if line.begins_with(".subckt"):
-			f.close()
-			return true
-	f.close()
+	if _netlist_satisfies_missing_dependency(slot, analysis):
+		return true
+	var display := str(slot.get("display", "")).to_lower()
+	if display.ends_with(".lib") or display.ends_with(".model") or display.ends_with(".mod"):
+		return true
+	if not (analysis.get("subckt_defs", []) as Array).is_empty() and (analysis.get("subckt_calls", []) as Array).is_empty():
+		return true
+	if projects.is_empty():
+		return false
+	if not _has_primary_netlist():
+		return false
+	if not (analysis.get("subckt_defs", []) as Array).is_empty():
+		return true
 	return false
+
+func _has_primary_netlist() -> bool:
+	for proj in projects:
+		if proj.get("spice") != null:
+			return true
+	return false
+
+func _netlist_satisfies_missing_dependency(slot: Dictionary, analysis: Dictionary) -> bool:
+	var display := str(slot.get("display", "")).to_lower()
+	var defs := _array_to_lookup(analysis.get("subckt_defs", []))
+	for proj in projects:
+		if proj.get("spice") == null:
+			continue
+		var report := _check_project_subcircuit_files(proj, false)
+		for missing_v in (report.get("missing_subckts", []) as Array):
+			if defs.has(str(missing_v).to_lower()):
+				return true
+		for include_v in (report.get("missing_includes", []) as Array):
+			if str(include_v).get_file().to_lower() == display:
+				return true
+	return false
+
+func _analyze_spice_file(user_path: String) -> Dictionary:
+	var report: Dictionary = {
+		"subckt_defs": [],
+		"subckt_calls": [],
+		"include_paths": []
+	}
+	var f := FileAccess.open(user_path, FileAccess.READ)
+	if f == null:
+		return report
+	var physical: Array[String] = []
+	while not f.eof_reached():
+		physical.append(f.get_line())
+	f.close()
+
+	var lines := _spice_logical_lines(physical)
+	var defs: Dictionary = {}
+	var calls: Dictionary = {}
+	var includes: Dictionary = {}
+	for raw_line in lines:
+		var line := _strip_spice_comment(str(raw_line)).strip_edges()
+		if line == "":
+			continue
+		var lower := line.to_lower()
+		if lower.begins_with(".subckt"):
+			var parts := line.split(" ", false)
+			if parts.size() >= 2:
+				defs[str(parts[1]).to_lower()] = str(parts[1])
+			continue
+		if lower.begins_with(".include") or lower.begins_with(".lib"):
+			var include_path := _extract_include_path(line)
+			if include_path != "":
+				includes[include_path.to_lower()] = include_path
+			continue
+		if lower.begins_with("x"):
+			var subckt_name := _extract_subckt_call_name(line)
+			if subckt_name != "":
+				calls[subckt_name.to_lower()] = subckt_name
+	report["subckt_defs"] = _lookup_values(defs)
+	report["subckt_calls"] = _lookup_values(calls)
+	report["include_paths"] = _lookup_values(includes)
+	return report
+
+func _spice_logical_lines(physical: Array[String]) -> Array[String]:
+	var logical: Array[String] = []
+	for raw in physical:
+		var line := str(raw).strip_edges()
+		if line.begins_with("+") and not logical.is_empty():
+			logical[logical.size() - 1] = str(logical[logical.size() - 1]) + " " + line.substr(1).strip_edges()
+		else:
+			logical.append(str(raw))
+	return logical
+
+func _strip_spice_comment(line: String) -> String:
+	var trimmed := line.strip_edges()
+	if trimmed.begins_with("*"):
+		return ""
+	var semicolon := line.find(";")
+	if semicolon >= 0:
+		return line.substr(0, semicolon)
+	return line
+
+func _extract_include_path(line: String) -> String:
+	if _include_re == null:
+		return ""
+	var m := _include_re.search(line)
+	if m == null:
+		return ""
+	return _unquote(str(m.get_string(2)).strip_edges())
+
+func _extract_subckt_call_name(line: String) -> String:
+	var tokens := line.split(" ", false)
+	if tokens.size() < 2:
+		return ""
+	for i in range(tokens.size() - 1, 0, -1):
+		var token := str(tokens[i]).strip_edges()
+		var lower := token.to_lower()
+		if token == "" or token.find("=") >= 0 or lower == "params:":
+			continue
+		return token
+	return ""
+
+func _check_project_subcircuit_files(proj: Dictionary, prompt: bool = true) -> Dictionary:
+	var report: Dictionary = {
+		"ok": true,
+		"missing_subckts": [],
+		"missing_includes": [],
+		"defined_subckts": [],
+		"called_subckts": []
+	}
+	var spice_v: Variant = proj.get("spice", null)
+	if typeof(spice_v) != TYPE_DICTIONARY:
+		return report
+
+	var spice_entry := spice_v as Dictionary
+	var spice_path := str(spice_entry.get("user_path", ""))
+	var root_analysis := _analysis_for_entry(spice_entry)
+	var definitions := _array_to_lookup(root_analysis.get("subckt_defs", []))
+	var calls := _array_to_lookup(root_analysis.get("subckt_calls", []))
+	var missing_includes: Dictionary = {}
+
+	for support_entry in _support_entries_for_project(spice_path):
+		var support_analysis := _analysis_for_entry(support_entry)
+		for def_v in (support_analysis.get("subckt_defs", []) as Array):
+			definitions[str(def_v).to_lower()] = str(def_v)
+
+	for include_v in (root_analysis.get("include_paths", []) as Array):
+		var include_path := str(include_v)
+		if not _include_file_is_available(include_path, spice_path):
+			missing_includes[include_path.to_lower()] = include_path
+
+	var missing_subckts: Dictionary = {}
+	for call_key in calls.keys():
+		if not definitions.has(call_key):
+			missing_subckts[call_key] = calls[call_key]
+
+	report["defined_subckts"] = _lookup_values(definitions)
+	report["called_subckts"] = _lookup_values(calls)
+	report["missing_subckts"] = _lookup_values(missing_subckts)
+	report["missing_includes"] = _lookup_values(missing_includes)
+	report["ok"] = (missing_subckts.is_empty() and missing_includes.is_empty())
+	if prompt and not bool(report["ok"]):
+		_prompt_missing_subcircuit_files(proj, report)
+	return report
+
+func _analysis_for_entry(entry: Dictionary) -> Dictionary:
+	var analysis_v: Variant = entry.get("spice_analysis", null)
+	if typeof(analysis_v) == TYPE_DICTIONARY:
+		return analysis_v as Dictionary
+	var analysis := _analyze_spice_file(str(entry.get("user_path", "")))
+	entry["spice_analysis"] = analysis
+	return analysis
+
+func _support_entries_for_project(spice_path: String) -> Array[Dictionary]:
+	var entries: Array[Dictionary] = []
+	for support_v in support_files:
+		var support := support_v as Dictionary
+		if str(support.get("user_path", "")) != spice_path:
+			entries.append(support)
+	for proj in projects:
+		var spice_v: Variant = proj.get("spice", null)
+		if typeof(spice_v) != TYPE_DICTIONARY:
+			continue
+		var spice := spice_v as Dictionary
+		if str(spice.get("user_path", "")) != spice_path:
+			entries.append(spice)
+	return entries
+
+func _include_file_is_available(include_path: String, spice_path: String) -> bool:
+	if include_path == "":
+		return false
+	if include_path.begins_with("user://") or include_path.begins_with("res://"):
+		return FileAccess.file_exists(include_path)
+	var base_dir := spice_path.get_base_dir()
+	if FileAccess.file_exists("%s/%s" % [base_dir, include_path]):
+		return true
+	var wanted := include_path.get_file().to_lower()
+	for entry in support_files:
+		if str((entry as Dictionary).get("display", "")).to_lower() == wanted:
+			return true
+	for proj in projects:
+		var spice_v: Variant = proj.get("spice", null)
+		if typeof(spice_v) == TYPE_DICTIONARY and str((spice_v as Dictionary).get("display", "")).to_lower() == wanted:
+			return true
+	return false
+
+func _prompt_missing_subcircuit_files(proj: Dictionary, report: Dictionary) -> void:
+	var pieces: Array[String] = []
+	var missing_subckts := report.get("missing_subckts", []) as Array
+	var missing_includes := report.get("missing_includes", []) as Array
+	if not missing_subckts.is_empty():
+		pieces.append("definitions for: %s" % ", ".join(_array_to_packed_strings(missing_subckts)))
+	if not missing_includes.is_empty():
+		var include_names := PackedStringArray()
+		for include_v in missing_includes:
+			include_names.append(str(include_v).get_file())
+		pieces.append("included files: %s" % ", ".join(include_names))
+	_refresh_status("upload missing subcircuit file(s)", StatusTone.WARN)
+	_log("[color=#b56a00][b]Missing subcircuit files:[/b][/color] Project '%s' needs %s. Upload the matching .spice/.cir/.net/.txt/.lib model file(s), then run again." % [
+		str(proj.get("name", "unnamed")),
+		"; ".join(pieces)
+	])
+
+func _recheck_all_project_dependencies(prompt_missing: bool = false) -> void:
+	for proj in projects:
+		if proj.get("spice") == null:
+			continue
+		var report := _check_project_subcircuit_files(proj, prompt_missing)
+		if bool(report.get("ok", true)) and not (report.get("called_subckts", []) as Array).is_empty():
+			_log("[color=darkgreen][b]OK:[/b][/color] Subcircuit files resolved for project '%s'." % str(proj.get("name", "unnamed")))
+
+func _array_to_lookup(values_v: Variant) -> Dictionary:
+	var lookup: Dictionary = {}
+	if typeof(values_v) != TYPE_ARRAY:
+		return lookup
+	for value_v in (values_v as Array):
+		var value := str(value_v)
+		if value != "":
+			lookup[value.to_lower()] = value
+	return lookup
+
+func _lookup_values(lookup: Dictionary) -> Array:
+	var values: Array = []
+	var keys := lookup.keys()
+	keys.sort()
+	for key in keys:
+		values.append(lookup[key])
+	return values
+
+func _array_to_packed_strings(values: Array) -> PackedStringArray:
+	var packed := PackedStringArray()
+	for value in values:
+		packed.append(str(value))
+	return packed
+
+func _unquote(value: String) -> String:
+	if value.length() >= 2:
+		var first := value.substr(0, 1)
+		var last := value.substr(value.length() - 1, 1)
+		if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
+			return value.substr(1, value.length() - 2)
+	return value
 
 func _assign_xschem(slot: Dictionary) -> void:
 	var buttons := _parse_buttons_from_sch(str(slot.get("user_path", "")))
@@ -523,11 +792,11 @@ func _assign_to_pending_slot(slot: Dictionary) -> void:
 
 	if key == "spice":
 		if not NETLIST_EXTS.has(ext):
-			_set_error("Expected a spice/netlist file (.spice/.cir/.net/.txt) for this slot.")
+			_set_error("Expected a spice/netlist file (.spice/.cir/.net/.txt/.lib/.model/.mod) for this slot.")
 			return
 		proj["spice"] = slot
 		proj["name"] = (slot["display"] as String).get_basename()
-		proj["complete"] = proj["xschem"] != null
+		proj["complete"] = true
 		spice_paired.emit(str(slot.get("user_path", "")))
 
 	elif key == "xschem":
@@ -610,6 +879,7 @@ func _auto_generate_spice(proj: Dictionary) -> bool:
 	proj["complete"] = true
 	spice_paired.emit(out_user_path)
 	_log("[color=darkgreen][b]OK:[/b][/color] Generated %s with xschem2spice." % str(spice_slot["display"]))
+	_check_project_subcircuit_files(proj, true)
 	_rebuild_cards()
 	return true
 
@@ -683,9 +953,6 @@ func _handle_web_batch(items: Array) -> void:
 		if schematic_count > 1:
 			_set_error("Please select at most one schematic file (.sch) per upload.")
 			return
-		if spice_count > 1:
-			_set_error("Please select at most one netlist/spice file per upload.")
-			return
 
 	var added := 0
 	for e in entries:
@@ -722,7 +989,7 @@ func _on_run_pressed() -> void:
 			complete.append(proj)
 
 	if complete.is_empty():
-		_set_error("No runnable project. Upload a .sch file so xschem2spice can generate its netlist.")
+		_set_error("No runnable project. Upload a SPICE netlist, or upload a .sch file so xschem2spice can generate one.")
 		return
 
 	_sim = _resolve_simulator()
@@ -743,6 +1010,9 @@ func _on_run_pressed() -> void:
 		return
 
 	var spice_entry: Dictionary = selected_proj["spice"]
+	var dep_report := _check_project_subcircuit_files(selected_proj, true)
+	if not bool(dep_report.get("ok", true)):
+		return
 	var spice_user_path := str(spice_entry["user_path"])
 
 	var switch_states: Dictionary = selected_proj.get("switch_states", {})
@@ -750,6 +1020,10 @@ func _on_run_pressed() -> void:
 		var patched := _patch_spice_for_switches(spice_user_path, switch_states)
 		if patched != "":
 			spice_user_path = patched
+
+	var support_patched := _patch_spice_for_subcircuit_support(spice_user_path, selected_proj)
+	if support_patched != "":
+		spice_user_path = support_patched
 
 	# Web uploads live behind Godot's user:// filesystem; the simulator can read that path directly.
 	var sim_path := spice_user_path if OS.has_feature("web") else ProjectSettings.globalize_path(spice_user_path)
@@ -915,6 +1189,8 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 	var normal_style := (_sb_card_selected if is_selected else _sb_card).duplicate() as StyleBoxFlat
 	card.add_theme_stylebox_override("panel", normal_style)
 	card.mouse_filter = Control.MOUSE_FILTER_STOP
+	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	card.clip_contents = true
 
 	card.gui_input.connect(_on_card_gui_input.bind(idx))
 
@@ -930,41 +1206,73 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 	var vbox := VBoxContainer.new()
 	vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vbox.add_theme_constant_override("separation", 4)
+	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	card.add_child(vbox)
 
-	var hbox := HBoxContainer.new()
-	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hbox.add_theme_constant_override("separation", 6)
-	vbox.add_child(hbox)
+	var title_row := HBoxContainer.new()
+	title_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	title_row.add_theme_constant_override("separation", 6)
+	title_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title_row.clip_contents = true
+	vbox.add_child(title_row)
+
+	var file_row := HBoxContainer.new()
+	file_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	file_row.add_theme_constant_override("separation", 6)
+	file_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	file_row.clip_contents = true
+	vbox.add_child(file_row)
 
 	var col_primary: Color   = Color("E0DDD4") if _dark_mode else Color(0, 0, 0)
 	var col_secondary: Color = Color("8A8880") if _dark_mode else Color("606060")
 	var col_mid: Color       = Color("9A9890") if _dark_mode else Color("404040")
+	var dep_report := _check_project_subcircuit_files(proj, false)
+	var has_missing_deps := not bool(dep_report.get("ok", true))
+
+	if has_missing_deps:
+		title_row.add_child(_build_dependency_error_badge(dep_report))
 
 	var title_lbl := Label.new()
 	title_lbl.text = "%s:" % str(proj["name"])
 	title_lbl.add_theme_color_override("font_color", col_primary)
 	title_lbl.add_theme_font_size_override("font_size", 13)
 	title_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hbox.add_child(title_lbl)
+	title_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title_lbl.custom_minimum_size = Vector2(0, 0)
+	title_lbl.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	title_lbl.tooltip_text = str(proj["name"])
+	title_row.add_child(title_lbl)
 
-	hbox.add_child(_build_slot_control(idx, "spice", proj["spice"]))
+	var total_bytes := 0
+	if proj["spice"] != null:
+		total_bytes += int((proj["spice"] as Dictionary).get("bytes", 0))
+	if proj["xschem"] != null:
+		total_bytes += int((proj["xschem"] as Dictionary).get("bytes", 0))
+	var size_lbl := Label.new()
+	size_lbl.text = _human_size(total_bytes)
+	size_lbl.add_theme_color_override("font_color", col_secondary)
+	size_lbl.add_theme_font_size_override("font_size", 12)
+	size_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	size_lbl.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	title_row.add_child(size_lbl)
+
+	file_row.add_child(_build_slot_control(idx, "spice", proj["spice"]))
 
 	var spice_ext_lbl := Label.new()
 	spice_ext_lbl.text = ".spice"
 	spice_ext_lbl.add_theme_color_override("font_color", col_secondary)
 	spice_ext_lbl.add_theme_font_size_override("font_size", 12)
 	spice_ext_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hbox.add_child(spice_ext_lbl)
+	file_row.add_child(spice_ext_lbl)
 
 	var and_lbl := Label.new()
 	and_lbl.text = "  and  "
 	and_lbl.add_theme_color_override("font_color", col_mid)
 	and_lbl.add_theme_font_size_override("font_size", 12)
 	and_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hbox.add_child(and_lbl)
+	file_row.add_child(and_lbl)
 
-	hbox.add_child(_build_slot_control(idx, "xschem", proj["xschem"]))
+	file_row.add_child(_build_slot_control(idx, "xschem", proj["xschem"]))
 
 	var sch_ext := ".sch"
 	if proj["xschem"] != null:
@@ -974,24 +1282,7 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 	xschem_ext_lbl.add_theme_color_override("font_color", col_secondary)
 	xschem_ext_lbl.add_theme_font_size_override("font_size", 12)
 	xschem_ext_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hbox.add_child(xschem_ext_lbl)
-
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hbox.add_child(spacer)
-
-	var total_bytes := 0
-	if proj["spice"] != null:
-		total_bytes += int((proj["spice"] as Dictionary).get("bytes", 0))
-	if proj["xschem"] != null:
-		total_bytes += int((proj["xschem"] as Dictionary).get("bytes", 0))
-	var size_lbl := Label.new()
-	size_lbl.text = "Size: %s" % _human_size(total_bytes)
-	size_lbl.add_theme_color_override("font_color", col_secondary)
-	size_lbl.add_theme_font_size_override("font_size", 12)
-	size_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hbox.add_child(size_lbl)
+	file_row.add_child(xschem_ext_lbl)
 
 	var buttons: Array = proj.get("buttons", [])
 	if buttons.size() > 0:
@@ -1020,16 +1311,71 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 
 	return card
 
+func _build_dependency_error_badge(report: Dictionary) -> Control:
+	var badge := PanelContainer.new()
+	badge.mouse_filter = Control.MOUSE_FILTER_STOP
+	badge.tooltip_text = _dependency_error_tooltip(report)
+	badge.custom_minimum_size = Vector2(18, 18)
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color("5A1818") if _dark_mode else Color("FFE1DA")
+	sb.border_color = Color("E05040") if _dark_mode else Color("CC2200")
+	sb.border_width_left = 1
+	sb.border_width_top = 1
+	sb.border_width_right = 1
+	sb.border_width_bottom = 1
+	sb.corner_radius_top_left = 2
+	sb.corner_radius_top_right = 2
+	sb.corner_radius_bottom_left = 2
+	sb.corner_radius_bottom_right = 2
+	sb.content_margin_left = 5
+	sb.content_margin_right = 5
+	sb.content_margin_top = 1
+	sb.content_margin_bottom = 1
+	badge.add_theme_stylebox_override("panel", sb)
+
+	var lbl := Label.new()
+	lbl.text = "!"
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.add_theme_color_override("font_color", Color("FFD6D0") if _dark_mode else Color("B02010"))
+	lbl.add_theme_font_size_override("font_size", 12)
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	badge.add_child(lbl)
+	return badge
+
+func _dependency_error_tooltip(report: Dictionary) -> String:
+	var parts: Array[String] = []
+	var missing_subckts := report.get("missing_subckts", []) as Array
+	if not missing_subckts.is_empty():
+		parts.append("Missing subcircuits: %s" % ", ".join(_array_to_packed_strings(missing_subckts)))
+	var missing_includes := report.get("missing_includes", []) as Array
+	if not missing_includes.is_empty():
+		var include_names := PackedStringArray()
+		for include_v in missing_includes:
+			include_names.append(str(include_v).get_file())
+		parts.append("Missing include files: %s" % ", ".join(include_names))
+	if parts.is_empty():
+		return "Subcircuit files resolved"
+	return "\n".join(parts)
+
 func _build_slot_control(proj_idx: int, slot_key: String, slot_data: Variant) -> Control:
 	if slot_data != null:
 		var container := PanelContainer.new()
 		container.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		container.add_theme_stylebox_override("panel", _sb_slot_box.duplicate())
+		container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		container.custom_minimum_size = Vector2(48, 0)
+		container.clip_contents = true
 		var lbl := Label.new()
-		lbl.text = (str((slot_data as Dictionary).get("display", ""))).get_basename()
+		var display := (str((slot_data as Dictionary).get("display", ""))).get_basename()
+		lbl.text = display
 		lbl.add_theme_color_override("font_color", Color("E0DDD4") if _dark_mode else Color(0, 0, 0))
 		lbl.add_theme_font_size_override("font_size", 12)
 		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		lbl.custom_minimum_size = Vector2(0, 0)
+		lbl.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		lbl.tooltip_text = display
 		container.add_child(lbl)
 		return container
 	else:
@@ -1041,6 +1387,7 @@ func _build_slot_control(proj_idx: int, slot_key: String, slot_data: Variant) ->
 		btn.add_theme_stylebox_override("focus", _sb_slot_box.duplicate())
 		btn.add_theme_color_override("font_color", Color("4A82D0") if _dark_mode else Color("316AC5"))
 		btn.add_theme_font_size_override("font_size", 12)
+		btn.custom_minimum_size = Vector2(32, 0)
 		btn.pressed.connect(func(): _on_slot_plus_pressed(proj_idx, slot_key))
 		return btn
 
@@ -1050,6 +1397,17 @@ func _on_card_gui_input(event: InputEvent, idx: int) -> void:
 		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
 			_selected_project = idx
 			_rebuild_cards.call_deferred()
+
+func _on_output_box_gui_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_WHEEL_UP \
+				or mb.button_index == MOUSE_BUTTON_WHEEL_DOWN \
+				or mb.button_index == MOUSE_BUTTON_WHEEL_LEFT \
+				or mb.button_index == MOUSE_BUTTON_WHEEL_RIGHT:
+			output_box.accept_event()
+	elif event is InputEventPanGesture:
+		output_box.accept_event()
 
 func _on_switch_toggled(proj_idx: int, btn_name: String, on: bool) -> void:
 	if proj_idx < 0 or proj_idx >= projects.size():
@@ -1080,6 +1438,7 @@ func _on_slot_plus_pressed(proj_idx: int, slot_key: String) -> void:
 
 func _on_clear_pressed() -> void:
 	projects.clear()
+	support_files.clear()
 	_selected_project = -1
 	_pending_slot_project = -1
 	_pending_slot_key = ""
@@ -1204,11 +1563,27 @@ func _build_workspace_manifest_for_zip() -> Dictionary:
 				"ext": str(s["ext"])
 			}
 		proj_list.append(proj_entry)
+	var support_list: Array = []
+	for support_slot in support_files:
+		var display := str(support_slot["display"])
+		var zip_name := _sanitize_filename(display)
+		if zip_name == "":
+			zip_name = "support.spice"
+		zip_name = _unique_name(zip_name, used)
+		used[zip_name] = true
+		support_list.append({
+			"name": display,
+			"zip_path": WORKSPACE_FILES_DIR + zip_name,
+			"user_path": str(support_slot["user_path"]),
+			"bytes": int(support_slot["bytes"]),
+			"ext": str(support_slot["ext"])
+		})
 	return {
 		"format": "circuit-visualizer-workspace-zip",
 		"version": 2,
 		"created_unix": int(Time.get_unix_time_from_system()),
-		"projects": proj_list
+		"projects": proj_list,
+		"support_files": support_list
 	}
 
 func _save_workspace_zip_to_filesystem_path(zip_abs_path: String) -> bool:
@@ -1270,6 +1645,30 @@ func _write_manifest_and_files(writer: ZIPPacker) -> bool:
 				_set_error("Zip write_file(%s) failed (err=%s)" % [zip_rel, str(err)])
 				return false
 			writer.close_file()
+
+	for support_var in (manifest.get("support_files", []) as Array):
+		var support_item := support_var as Dictionary
+		var support_user_path := str(support_item.get("user_path", ""))
+		var support_zip_rel := str(support_item.get("zip_path", ""))
+		var support_fa := FileAccess.open(support_user_path, FileAccess.READ)
+		if support_fa == null:
+			writer.close()
+			_set_error("Could not open support file for zipping: %s" % support_user_path)
+			return false
+		var support_buf := support_fa.get_buffer(support_fa.get_length())
+		support_fa.close()
+		err = writer.start_file(support_zip_rel)
+		if err != OK:
+			writer.close()
+			_set_error("Zip start_file(%s) failed (err=%s)" % [support_zip_rel, str(err)])
+			return false
+		err = writer.write_file(support_buf)
+		if err != OK:
+			writer.close_file()
+			writer.close()
+			_set_error("Zip write_file(%s) failed (err=%s)" % [support_zip_rel, str(err)])
+			return false
+		writer.close_file()
 
 	writer.close()
 	return true
@@ -1346,12 +1745,15 @@ func _load_workspace_zip_from_path(path: String) -> void:
 					continue
 				wf.store_buffer(buf)
 				wf.close()
-				new_proj[slot_key] = {
+				var loaded_slot: Dictionary = {
 					"display": safe_name,
 					"user_path": user_path,
 					"bytes": buf.size(),
 					"ext": safe_name.get_extension().to_lower()
 				}
+				if slot_key == "spice":
+					loaded_slot["spice_analysis"] = _analyze_spice_file(user_path)
+				new_proj[slot_key] = loaded_slot
 				if slot_key == "xschem":
 					var buttons := _parse_buttons_from_sch(user_path)
 					var sw: Dictionary = {}
@@ -1359,8 +1761,38 @@ func _load_workspace_zip_from_path(path: String) -> void:
 						sw[b] = false
 					new_proj["buttons"] = buttons
 					new_proj["switch_states"] = sw
-			new_proj["complete"] = new_proj["xschem"] != null and new_proj["spice"] != null
+			new_proj["complete"] = new_proj["spice"] != null
 			projects.append(new_proj)
+		var support_list_var: Variant = m.get("support_files", [])
+		if typeof(support_list_var) == TYPE_ARRAY:
+			for support_saved_v in (support_list_var as Array):
+				if typeof(support_saved_v) != TYPE_DICTIONARY:
+					continue
+				var support_saved := support_saved_v as Dictionary
+				var support_name := str(support_saved.get("name", "support.spice"))
+				var support_zip_rel := str(support_saved.get("zip_path", ""))
+				if support_zip_rel == "":
+					continue
+				var support_buf := reader.read_file(support_zip_rel)
+				if support_buf.is_empty():
+					_log("[color=#b56a00][b]Warning:[/b][/color] Missing support zip entry: %s" % support_zip_rel)
+					continue
+				var support_safe_name := _sanitize_filename(support_name)
+				var support_user_path := _avoid_collision("%s/%s" % [UPLOAD_DIR, support_safe_name])
+				var support_wf := FileAccess.open(support_user_path, FileAccess.WRITE)
+				if support_wf == null:
+					_set_error("Failed to write %s" % support_user_path)
+					continue
+				support_wf.store_buffer(support_buf)
+				support_wf.close()
+				var support_slot: Dictionary = {
+					"display": support_safe_name,
+					"user_path": support_user_path,
+					"bytes": support_buf.size(),
+					"ext": support_safe_name.get_extension().to_lower()
+				}
+				support_slot["spice_analysis"] = _analyze_spice_file(support_user_path)
+				support_files.append(support_slot)
 		reader.close()
 	else:
 		var items_var: Variant = m.get("items", [])
@@ -1451,6 +1883,64 @@ func _patch_spice_for_switches(user_path: String, switch_states: Dictionary) -> 
 		return ""
 	wf.store_string("\n".join(lines))
 	wf.close()
+	return tmp_path
+
+func _patch_spice_for_subcircuit_support(user_path: String, proj: Dictionary) -> String:
+	var root_entry_v: Variant = proj.get("spice", null)
+	if typeof(root_entry_v) != TYPE_DICTIONARY:
+		return ""
+	var root_entry := root_entry_v as Dictionary
+	var root_analysis := _analysis_for_entry(root_entry)
+	var root_defs := _array_to_lookup(root_analysis.get("subckt_defs", []))
+	var calls := _array_to_lookup(root_analysis.get("subckt_calls", []))
+	if calls.is_empty():
+		return ""
+
+	var include_paths := PackedStringArray()
+	var seen_paths: Dictionary = {}
+	for support_entry in _support_entries_for_project(str(root_entry.get("user_path", ""))):
+		var support_analysis := _analysis_for_entry(support_entry)
+		var support_defs := _array_to_lookup(support_analysis.get("subckt_defs", []))
+		var needed := false
+		for call_key in calls.keys():
+			if not root_defs.has(call_key) and support_defs.has(call_key):
+				needed = true
+				break
+		if not needed:
+			continue
+		var support_user_path := str(support_entry.get("user_path", ""))
+		if support_user_path == "" or seen_paths.has(support_user_path):
+			continue
+		seen_paths[support_user_path] = true
+		include_paths.append(support_user_path if OS.has_feature("web") else ProjectSettings.globalize_path(support_user_path))
+
+	if include_paths.is_empty():
+		return ""
+
+	var fa := FileAccess.open(user_path, FileAccess.READ)
+	if fa == null:
+		return ""
+	var content := fa.get_as_text()
+	fa.close()
+
+	var lines := content.split("\n")
+	var insert_at := lines.size()
+	for i in range(lines.size() - 1, -1, -1):
+		if str(lines[i]).strip_edges().to_lower() == ".end":
+			insert_at = i
+			break
+	for include_path in include_paths:
+		lines.insert(insert_at, ".include \"%s\"" % include_path)
+		insert_at += 1
+
+	_ensure_upload_dir()
+	var tmp_path := "%s/_sim_subckts_%d.spice" % [UPLOAD_DIR, int(Time.get_unix_time_from_system())]
+	var wf := FileAccess.open(tmp_path, FileAccess.WRITE)
+	if wf == null:
+		return ""
+	wf.store_string("\n".join(lines))
+	wf.close()
+	_log("[color=#336699][b]Info:[/b][/color] Added %d uploaded subcircuit include(s) for this run." % include_paths.size())
 	return tmp_path
 
 # -------------------------------------------------------------------

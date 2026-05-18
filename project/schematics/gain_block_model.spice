@@ -1,0 +1,7 @@
+* Test fixture: upload after subcircuit_missing_main.spice.
+* This file supplies the gain_block subcircuit definition.
+
+.subckt gain_block in out
+EGAIN out 0 in 0 2
+RIN in 0 1Meg
+.ends gain_block

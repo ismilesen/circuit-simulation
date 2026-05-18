@@ -5,8 +5,8 @@ signal spice_paired(path: String)
 signal pdk_component_selected(component: Dictionary)
 
 const UPLOAD_PANEL_SCENE := "res://ui/upload_panel.tscn"
-const MIN_PANEL_WIDTH: float = 400.0
-const MAX_PANEL_WIDTH: float = 720.0
+const MIN_PANEL_WIDTH: float = 560.0
+const MAX_PANEL_WIDTH: float = 920.0
 const BUTTON_WIDTH: float = 32.0
 const SLIDE_DURATION: float = 0.25
 

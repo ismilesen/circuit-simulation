@@ -143,20 +143,23 @@ theme_override_font_sizes/font_size = 11
 text = "idle"
 
 [node name="Output" type="RichTextLabel" parent="Margin/VBox" unique_id=831178571]
-custom_minimum_size = Vector2(0, 80)
+custom_minimum_size = Vector2(0, 120)
 layout_mode = 2
 size_flags_horizontal = 3
 size_flags_vertical = 0
 focus_mode = 2
-fit_content = true
+fit_content = false
+scroll_active = true
+scroll_following = true
 selection_enabled = true
+mouse_filter = 0
 
 [node name="FileDialog" type="FileDialog" parent="." unique_id=1248185806]
 access = 2
 file_mode = 4
 use_native_dialog = true
 title = "Select an xschem schematic"
-filters = PackedStringArray("*.sch, *.sym ; Xschem schematic/symbol files", "*.spice, *.cir, *.net, *.txt ; Existing SPICE netlists")
+filters = PackedStringArray("*.sch, *.sym ; Xschem schematic/symbol files", "*.spice, *.cir, *.net, *.txt, *.lib, *.model, *.mod ; SPICE netlists/models")
 
 [node name="WorkspaceDialog" type="FileDialog" parent="." unique_id=1591704674]
 title = "Workspace"

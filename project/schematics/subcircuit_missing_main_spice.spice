@@ -1,0 +1,9 @@
+* Test fixture: same as subcircuit_missing_main.spice, with an underscore-style basename.
+* Upload this first to trigger the missing subcircuit prompt.
+
+V1 in 0 DC 1
+XU1 in out gain_block
+RLOAD out 0 10k
+
+.tran 1u 1m
+.end

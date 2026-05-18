@@ -31,7 +31,7 @@
   // plus workspace zips for Load Workspace.
   var ACCEPT_EXTS = [
     ".sch", ".sym",
-    ".spice", ".cir", ".net", ".txt",
+    ".spice", ".cir", ".net", ".txt", ".lib", ".model", ".mod",
     ".zip", ".cvw.zip"
   ];
 
