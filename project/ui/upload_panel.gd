@@ -14,7 +14,10 @@ const WORKSPACE_FILES_DIR := "files/"
 const WEB_PDK_CACHE_ROOT := "user://pdks/sky130"
 
 var NETLIST_EXTS: PackedStringArray = PackedStringArray(["spice", "cir", "net", "txt"])
+var SCHEMATIC_EXTS: PackedStringArray = PackedStringArray(["sch"])
+var SYMBOL_EXTS: PackedStringArray = PackedStringArray(["sym"])
 var XSCHEM_EXTS: PackedStringArray = PackedStringArray(["sch", "sym"])
+var SYMBOL_DIRS: PackedStringArray = PackedStringArray(["res://symbols", "res://symbols/sym"])
 
 @onready var upload_button: Button = $Margin/VBox/ControlsCol/PrimaryRow/UploadButton
 @onready var run_button: Button = $Margin/VBox/ControlsCol/PrimaryRow/RunButton
@@ -102,8 +105,8 @@ func _ready() -> void:
 	file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILES
 	file_dialog.use_native_dialog = true
 	file_dialog.clear_filters()
-	file_dialog.add_filter("*.spice, *.cir, *.net, *.txt ; Netlists")
 	file_dialog.add_filter("*.sch, *.sym ; Xschem schematics/symbols")
+	file_dialog.add_filter("*.spice, *.cir, *.net, *.txt ; Existing SPICE netlists")
 	file_dialog.add_filter("* ; All files")
 
 	upload_button.pressed.connect(Callable(self, "_on_upload_pressed"))
@@ -302,18 +305,23 @@ func _on_native_file_selected(path: String) -> void:
 	if path.strip_edges() == "":
 		return
 	_stage_native_file(path)
+	if XSCHEM_EXTS.has(path.get_extension().to_lower()):
+		_resolve_autogen_projects()
 
 func _on_native_files_selected(paths: PackedStringArray) -> void:
 	if paths.is_empty():
 		return
-	var xschem_paths: Array[String] = []
+	var schematic_paths: Array[String] = []
+	var symbol_paths: Array[String] = []
 	var spice_paths: Array[String] = []
 	for p: String in paths:
 		if p.strip_edges() == "":
 			continue
 		var ext := p.get_extension().to_lower()
-		if XSCHEM_EXTS.has(ext):
-			xschem_paths.append(p)
+		if SCHEMATIC_EXTS.has(ext):
+			schematic_paths.append(p)
+		elif SYMBOL_EXTS.has(ext):
+			symbol_paths.append(p)
 		elif NETLIST_EXTS.has(ext):
 			spice_paths.append(p)
 
@@ -324,20 +332,26 @@ func _on_native_files_selected(paths: PackedStringArray) -> void:
 			_pending_slot_key = ""
 			return
 	else:
-		if xschem_paths.size() > 1:
-			_set_error("Please select at most one xschem file (.sch/.sym) at a time.")
+		if schematic_paths.size() > 1:
+			_set_error("Please select at most one schematic file (.sch) at a time.")
 			return
 		if spice_paths.size() > 1:
 			_set_error("Please select at most one netlist/spice file at a time.")
 			return
 
 	var added := 0
-	for p in xschem_paths:
+	for p in schematic_paths:
+		if _stage_native_file(p):
+			added += 1
+	for p in symbol_paths:
 		if _stage_native_file(p):
 			added += 1
 	for p in spice_paths:
 		if _stage_native_file(p):
 			added += 1
+
+	if not schematic_paths.is_empty() or not symbol_paths.is_empty():
+		_resolve_autogen_projects()
 
 	if added > 0:
 		_flash_drop_zone()
@@ -351,10 +365,17 @@ func _on_os_files_dropped(files: PackedStringArray) -> void:
 	if files.is_empty():
 		return
 	var added := 0
+	var saw_xschem := false
 	for p: String in files:
 		if p.strip_edges() == "":
 			continue
+		if XSCHEM_EXTS.has(p.get_extension().to_lower()):
+			saw_xschem = true
 		added += int(_stage_native_file(p))
+
+	if saw_xschem:
+		_resolve_autogen_projects()
+
 	if added > 0:
 		_flash_drop_zone()
 		_refresh_status("dropped %d file(s)" % added, StatusTone.OK)
@@ -396,8 +417,10 @@ func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
 
 	if _pending_slot_project >= 0 and _pending_slot_key != "":
 		_assign_to_pending_slot(slot)
-	elif XSCHEM_EXTS.has(ext):
+	elif SCHEMATIC_EXTS.has(ext):
 		_assign_xschem(slot)
+	elif SYMBOL_EXTS.has(ext):
+		_log("[color=#336699][b]Info:[/b][/color] Added symbol file for xschem2spice lookup.")
 	elif NETLIST_EXTS.has(ext):
 		if ext == "spice" and _spice_has_subckt(user_path):
 			_set_error("Contains .subckt")
@@ -487,8 +510,10 @@ func _assign_to_pending_slot(slot: Dictionary) -> void:
 
 	if idx < 0 or idx >= projects.size():
 		var ext := str(slot.get("ext", ""))
-		if XSCHEM_EXTS.has(ext):
+		if SCHEMATIC_EXTS.has(ext):
 			_assign_xschem(slot)
+		elif SYMBOL_EXTS.has(ext):
+			_resolve_autogen_projects()
 		elif NETLIST_EXTS.has(ext):
 			_assign_spice(slot)
 		return
@@ -506,8 +531,8 @@ func _assign_to_pending_slot(slot: Dictionary) -> void:
 		spice_paired.emit(str(slot.get("user_path", "")))
 
 	elif key == "xschem":
-		if not XSCHEM_EXTS.has(ext):
-			_set_error("Expected an xschem file (.sch/.sym) for this slot.")
+		if not SCHEMATIC_EXTS.has(ext):
+			_set_error("Expected an xschem schematic file (.sch) for this slot.")
 			return
 		proj["xschem"] = slot
 		proj["complete"] = proj["spice"] != null
@@ -518,6 +543,75 @@ func _assign_to_pending_slot(slot: Dictionary) -> void:
 		proj["buttons"] = buttons
 		proj["switch_states"] = sw
 		schematic_requested.emit(str(slot.get("user_path", "")))
+		_resolve_autogen_projects()
+
+# -------------------------------------------------------------------
+# Automatic xschem -> SPICE conversion
+# -------------------------------------------------------------------
+
+func _resolve_autogen_projects() -> void:
+	for proj in projects:
+		if proj.get("xschem") != null and proj.get("spice") == null:
+			_auto_generate_spice(proj)
+
+func _auto_generate_spice(proj: Dictionary) -> bool:
+	var xschem_slot_v: Variant = proj.get("xschem")
+	if typeof(xschem_slot_v) != TYPE_DICTIONARY:
+		return false
+
+	var xschem_slot := xschem_slot_v as Dictionary
+	if str(xschem_slot.get("ext", "")).to_lower() != "sch":
+		return false
+
+	var sch_user_path := str(xschem_slot.get("user_path", ""))
+	if sch_user_path == "":
+		return false
+
+	var sim := _resolve_simulator()
+	if sim == null or not sim.has_method("xschem_to_spice"):
+		_set_error("xschem2spice is unavailable. Rebuild the GDExtension after initializing submodules.")
+		return false
+
+	_ensure_upload_dir()
+	var base := str(xschem_slot.get("display", "schematic")).get_basename()
+	var out_user_path := _avoid_collision("%s/%s.spice" % [UPLOAD_DIR, base])
+	var sch_os_path := ProjectSettings.globalize_path(sch_user_path)
+	var out_os_path := ProjectSettings.globalize_path(out_user_path)
+
+	var symbol_dirs := PackedStringArray()
+	for d in SYMBOL_DIRS:
+		symbol_dirs.append(ProjectSettings.globalize_path(d))
+	symbol_dirs.append(ProjectSettings.globalize_path(UPLOAD_DIR))
+
+	var res_v: Variant = sim.call("xschem_to_spice", sch_os_path, out_os_path, "", symbol_dirs)
+	if typeof(res_v) != TYPE_DICTIONARY:
+		_set_error("xschem2spice returned an unexpected result.")
+		return false
+
+	var res := res_v as Dictionary
+	if not bool(res.get("ok", false)):
+		_set_error("xschem2spice failed for %s: %s" % [base, str(res.get("error", "unknown error"))])
+		return false
+
+	var out_bytes := 0
+	var fa := FileAccess.open(out_user_path, FileAccess.READ)
+	if fa != null:
+		out_bytes = fa.get_length()
+		fa.close()
+
+	var spice_slot: Dictionary = {
+		"display": out_user_path.get_file(),
+		"user_path": out_user_path,
+		"bytes": out_bytes,
+		"ext": "spice",
+		"autogenerated": true
+	}
+	proj["spice"] = spice_slot
+	proj["complete"] = true
+	spice_paired.emit(out_user_path)
+	_log("[color=darkgreen][b]OK:[/b][/color] Generated %s with xschem2spice." % str(spice_slot["display"]))
+	_rebuild_cards()
+	return true
 
 # -------------------------------------------------------------------
 # Web queue polling
@@ -557,7 +651,8 @@ func _poll_web_queue() -> void:
 	_set_error("Web upload: unrecognized queue item.")
 
 func _handle_web_batch(items: Array) -> void:
-	var xschem_count := 0
+	var schematic_count := 0
+	var symbol_count := 0
 	var spice_count := 0
 	var entries: Array = []
 	for it_v in items:
@@ -576,15 +671,17 @@ func _handle_web_batch(items: Array) -> void:
 				_refresh_status("web: workspace loaded", StatusTone.OK)
 			return
 		var ext := filename.get_extension().to_lower()
-		if XSCHEM_EXTS.has(ext):
-			xschem_count += 1
+		if SCHEMATIC_EXTS.has(ext):
+			schematic_count += 1
+		elif SYMBOL_EXTS.has(ext):
+			symbol_count += 1
 		elif NETLIST_EXTS.has(ext):
 			spice_count += 1
 		entries.append({"name": filename, "bytes": bytes})
 
 	if _pending_slot_project < 0:
-		if xschem_count > 1:
-			_set_error("Please select at most one xschem file (.sch/.sym) per upload.")
+		if schematic_count > 1:
+			_set_error("Please select at most one schematic file (.sch) per upload.")
 			return
 		if spice_count > 1:
 			_set_error("Please select at most one netlist/spice file per upload.")
@@ -594,6 +691,10 @@ func _handle_web_batch(items: Array) -> void:
 	for e in entries:
 		if _stage_bytes(str(e["name"]), e["bytes"] as PackedByteArray):
 			added += 1
+
+	if schematic_count > 0 or symbol_count > 0:
+		_resolve_autogen_projects()
+
 	if added > 0:
 		_flash_drop_zone()
 		_refresh_status("web: staged %d file(s)" % added, StatusTone.OK)
@@ -621,7 +722,7 @@ func _on_run_pressed() -> void:
 			complete.append(proj)
 
 	if complete.is_empty():
-		_set_error("No complete project (needs both an xschem and a spice file).")
+		_set_error("No runnable project. Upload a .sch file so xschem2spice can generate its netlist.")
 		return
 
 	_sim = _resolve_simulator()

@@ -4,17 +4,22 @@ A Godot 4.5 GDExtension project for visualizing and simulating electronic circui
 
 ## Setup
 
-### 1. Clone with submodules
+### 1. Clone with app submodules
 
 ```bash
-git clone --recursive https://github.com/ismilesen/circuit-simulator.git
+git clone https://github.com/ismilesen/circuit-simulator.git
 cd circuit-simulator
+git submodule update --init godot-cpp src/xschem2spice
 ```
 
-If you already cloned without `--recursive`:
+Do not use `--recursive` for the normal app build. The `xschem2spice`
+repository contains large test-fixture submodules, and one nested test
+dependency uses an SSH URL. Those tests are not needed to compile this project.
+
+If you already cloned without submodules:
 
 ```bash
-git submodule update --init --recursive
+git submodule update --init godot-cpp src/xschem2spice
 ```
 
 ### 2. Build the GDExtension
@@ -23,18 +28,26 @@ git submodule update --init --recursive
 scons
 ```
 
-This compiles the C++ source in `src/` and places the resulting shared library in `project/bin/`.
+This compiles the C++ source in `src/`, including the `src/xschem2spice`
+submodule library sources, and places the resulting shared library in
+`project/bin/`.
+
+For web exports, install and activate Emscripten before building:
+
+```bash
+scons platform=web target=template_debug threads=no
+scons platform=web target=template_release threads=no
+```
+
+If SCons reports `Required toolchain not found for platform web`, Emscripten is
+not active in the shell that is running the build.
 
 ### 3. ngspice (optional, for simulation)
 
 The simulator dynamically loads ngspice at runtime. To enable simulation:
 
 1. Download ngspice from https://ngspice.sourceforge.io/
-<<<<<<< HEAD
 2. Place `ngspice.dll` (Windows) or `libngspice.so` (Linux) and `sharedspice.h` in a new folder named `ngspice`.
-=======
-2. Place `ngspice.dll` (Windows) or `libngspice.so` (Linux) where Godot can find it (e.g. `project/bin/`).
->>>>>>> cd7f9eb (visualization and simulation addition)
 3. If building with ngspice headers, uncomment and set the `CPPPATH` line in `SConstruct`.
 
 ### 4. Open in Godot
@@ -43,9 +56,9 @@ Open the `project/` folder as a Godot project (Godot 4.5+).
 
 ## Adding circuit files
 
-- Place `.sym` symbol files in `project/symbols/sym/`
-- Place `.sch` schematic files in `project/schematics/`
-- You can also drag-and-drop files into the running application via the upload panel.
+- Place `.sch` schematic files in `project/schematics/`.
+- Place supporting `.sym` symbol files in `project/symbols/sym/`, or upload them alongside the schematic.
+- You can also drag-and-drop files into the running application via the upload panel. A `.sch` upload is converted to a generated `.spice` netlist with `xschem2spice`; uploading a separate netlist is optional.
 
 ## Project structure
 

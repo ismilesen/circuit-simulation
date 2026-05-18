@@ -34,12 +34,14 @@ def find_web_ngspice_library():
 
 
 env = SConscript("godot-cpp/SConstruct")
-# Our C++ source
-env.Append(CPPPATH=["src/"])
-# ngspice headers — uncomment and adjust if you have ngspice installed locally:
+
+# Our C++ source + xschem2spice public headers.
+env.Append(CPPPATH=["src/", "src/xschem2spice/src/"])
+
+# ngspice headers - uncomment and adjust if you have ngspice installed locally:
 # env.Append(CPPPATH=["path/to/ngspice/include/"])
 
-# Web-specific flags required for GDExtension side module
+# Web-specific flags required for GDExtension side module.
 if env["platform"] == "web":
     ngspice_lib = find_web_ngspice_library()
     env.Append(LINKFLAGS=[
@@ -48,8 +50,17 @@ if env["platform"] == "web":
     ])
     env.Append(CCFLAGS=["-sSIDE_MODULE=1"])
 
-# Source files
-sources = Glob("src/*.cpp")
+# Build the xschem2spice library sources from the submodule, but do not compile
+# its demo CLI because it defines main().
+xschem2spice_sources = [
+    "src/xschem2spice/src/parser.c",
+    "src/xschem2spice/src/netlist.c",
+    "src/xschem2spice/src/hash.c",
+    "src/xschem2spice/src/strutil.c",
+    "src/xschem2spice/src/xschemrc.c",
+]
+sources = Glob("src/*.cpp") + xschem2spice_sources
+
 # Build the shared library into project/bin/
 library = env.SharedLibrary(
     "project/bin/libcircuit_sim{}{}".format(env["suffix"], env["SHLIBSUFFIX"]),

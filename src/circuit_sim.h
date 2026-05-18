@@ -94,6 +94,13 @@ public:
     void stop_continuous();
     bool is_running() const;
 
+    Dictionary xschem_to_spice(
+        const String &schematic_path,
+        const String &output_path,
+        const String &xschemrc_path = "",
+        const PackedStringArray &symbol_dirs = PackedStringArray()
+    );
+
     void ingest_signal_names(const PackedStringArray &names);
     void ingest_sample(const PackedFloat64Array &sample);
 

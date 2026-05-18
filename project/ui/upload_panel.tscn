@@ -31,7 +31,7 @@ text = "Circuit Upload"
 [node name="Subheader" type="Label" parent="Margin/VBox" unique_id=1244388532]
 layout_mode = 2
 theme_override_font_sizes/font_size = 11
-text = "Each project pairs one xchem schematic with one spice netlist. Pick a project below and press Run."
+text = "Upload an xschem schematic; SPICE netlists are generated automatically. Pick a project below and press Run."
 autowrap_mode = 3
 
 [node name="ControlsCol" type="VBoxContainer" parent="Margin/VBox" unique_id=781778362]
@@ -105,7 +105,7 @@ text = "Drop files here"
 [node name="DropHint" type="Label" parent="Margin/VBox/DropZone/DropZoneMargin/DropZoneVBox" unique_id=1384803892]
 layout_mode = 2
 theme_override_font_sizes/font_size = 10
-text = "1 xchem (.sch/.sym) + 1 spice (.spice/.cir/.net/.txt). Click + on a card to fill a missing slot."
+text = "Drop one xschem schematic (.sch). Optional .sym files are used for symbol lookup."
 autowrap_mode = 3
 
 [node name="CardContainer" type="PanelContainer" parent="Margin/VBox" unique_id=981189223]
@@ -152,10 +152,11 @@ fit_content = true
 selection_enabled = true
 
 [node name="FileDialog" type="FileDialog" parent="." unique_id=1248185806]
-title = "Select one xchem and/or one spice"
 access = 2
-filters = PackedStringArray("*.sch, *.sym, *.spice, *.cir, *.net, *.txt ; Project files (xchem + spice)", "*.sch, *.sym ; Xschem schematics/symbols", "*.spice, *.cir, *.net, *.txt ; Spice netlists")
+file_mode = 4
 use_native_dialog = true
+title = "Select an xschem schematic"
+filters = PackedStringArray("*.sch, *.sym ; Xschem schematic/symbol files", "*.spice, *.cir, *.net, *.txt ; Existing SPICE netlists")
 
 [node name="WorkspaceDialog" type="FileDialog" parent="." unique_id=1591704674]
 title = "Workspace"

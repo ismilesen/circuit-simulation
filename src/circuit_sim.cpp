@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <chrono>
 #include <cmath>
@@ -27,6 +28,12 @@ namespace fs = std::filesystem;
 #include <fstream>
 #include <sys/stat.h>
 #endif
+
+extern "C" {
+#include "netlist.h"
+#include "parser.h"
+#include "xschemrc.h"
+}
 
 using namespace godot;
 
@@ -674,6 +681,12 @@ void CircuitSimulator::_bind_methods() {
                          &CircuitSimulator::run_continuous, DEFVAL(""));
     ClassDB::bind_method(D_METHOD("stop_continuous"), &CircuitSimulator::stop_continuous);
     ClassDB::bind_method(D_METHOD("is_running"), &CircuitSimulator::is_running);
+    ClassDB::bind_method(
+        D_METHOD("xschem_to_spice", "schematic_path", "output_path", "xschemrc_path", "symbol_dirs"),
+        &CircuitSimulator::xschem_to_spice,
+        DEFVAL(""),
+        DEFVAL(PackedStringArray())
+    );
 
     ADD_SIGNAL(MethodInfo("simulation_started"));
     ADD_SIGNAL(MethodInfo("simulation_finished"));
@@ -836,7 +849,132 @@ void CircuitSimulator::shutdown_ngspice() {
 }
 
 // ─── Main entry point ────────────────────────────────────────────────────────
+// Converts an xschem schematic to a SPICE deck via the xschem2spice submodule.
+Dictionary CircuitSimulator::xschem_to_spice(
+    const String &schematic_path,
+    const String &output_path,
+    const String &xschemrc_path,
+    const PackedStringArray &symbol_dirs
+) {
+    Dictionary result;
+    result["ok"] = false;
 
+    CharString schematic_utf8 = schematic_path.utf8();
+    CharString output_utf8 = output_path.utf8();
+    CharString xschemrc_utf8 = xschemrc_path.utf8();
+
+#ifndef __EMSCRIPTEN__
+    const fs::path schematic_fs_path = fs::absolute(fs::path(schematic_utf8.get_data())).lexically_normal();
+    const fs::path output_fs_path = fs::absolute(fs::path(output_utf8.get_data())).lexically_normal();
+    const fs::path output_dir = output_fs_path.parent_path();
+
+    if (!fs::exists(schematic_fs_path)) {
+        result["error"] = String("schematic file does not exist: ") + String(schematic_fs_path.string().c_str());
+        return result;
+    }
+
+    std::error_code ec;
+    if (!output_dir.empty()) {
+        fs::create_directories(output_dir, ec);
+        if (ec) {
+            result["error"] = String("failed to create output directory: ") + String(ec.message().c_str());
+            return result;
+        }
+    }
+
+    FILE *out = std::fopen(output_fs_path.string().c_str(), "w");
+#else
+    const std::string schematic_fs_path(schematic_utf8.get_data());
+    const std::string output_fs_path(output_utf8.get_data());
+
+    FILE *test_schematic = std::fopen(schematic_fs_path.c_str(), "r");
+    if (!test_schematic) {
+        result["error"] = String("schematic file does not exist: ") + String(schematic_fs_path.c_str());
+        return result;
+    }
+    std::fclose(test_schematic);
+
+    FILE *out = std::fopen(output_fs_path.c_str(), "w");
+#endif
+    if (!out) {
+#ifndef __EMSCRIPTEN__
+        result["error"] = String("failed to open output file: ") + String(output_fs_path.string().c_str());
+#else
+        result["error"] = String("failed to open output file: ") + String(output_fs_path.c_str());
+#endif
+        return result;
+    }
+
+    xs_library_path library_path;
+    xs_library_path_init(&library_path);
+
+    if (xschemrc_path.length() > 0) {
+        xs_library_path_load_xschemrc(&library_path, xschemrc_utf8.get_data());
+    }
+
+#ifndef __EMSCRIPTEN__
+    const fs::path schematic_dir = schematic_fs_path.parent_path();
+    if (!schematic_dir.empty()) {
+        xs_library_path_add(&library_path, schematic_dir.string().c_str());
+    }
+#else
+    const std::string schematic_dir = web_dirname(schematic_fs_path);
+    if (!schematic_dir.empty()) {
+        xs_library_path_add(&library_path, schematic_dir.c_str());
+    }
+#endif
+
+    std::vector<CharString> symbol_dir_utf8;
+    symbol_dir_utf8.reserve(symbol_dirs.size());
+    for (int64_t i = 0; i < symbol_dirs.size(); i++) {
+        String dir = symbol_dirs[i];
+        if (dir.strip_edges().is_empty()) {
+            continue;
+        }
+        symbol_dir_utf8.push_back(dir.utf8());
+        xs_library_path_add(&library_path, symbol_dir_utf8.back().get_data());
+    }
+
+    xs_schematic schematic;
+#ifndef __EMSCRIPTEN__
+    int status = xs_parse_schematic(schematic_fs_path.string().c_str(), &schematic);
+#else
+    int status = xs_parse_schematic(schematic_fs_path.c_str(), &schematic);
+#endif
+    if (status == 0) {
+        xs_netlister netlister;
+        xs_netlister_init(&netlister, &library_path, 1);
+        status = xs_netlister_resolve_symbols(&netlister, &schematic);
+        if (status == 0) {
+            status = xs_netlister_emit_spice(&netlister, &schematic, out);
+        }
+        xs_netlister_free(&netlister);
+        xs_free_schematic(&schematic);
+    }
+
+    std::fclose(out);
+    xs_library_path_free(&library_path);
+
+    if (status != 0) {
+#ifndef __EMSCRIPTEN__
+        fs::remove(output_fs_path, ec);
+#else
+        std::remove(output_fs_path.c_str());
+#endif
+        result["error"] = String("xschem2spice failed to generate a SPICE netlist");
+        return result;
+    }
+
+    result["ok"] = true;
+#ifndef __EMSCRIPTEN__
+    result["output_path"] = String(output_fs_path.string().c_str());
+#else
+    result["output_path"] = String(output_fs_path.c_str());
+#endif
+    return result;
+}
+
+// Main entry point.
 bool CircuitSimulator::run_continuous(const String &spice_path, const String &pdk_root) {
     if (!initialized && !initialize_ngspice()) return false;
 
