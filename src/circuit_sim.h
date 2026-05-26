@@ -92,6 +92,7 @@ public:
 
     bool run_continuous(const String &spice_path, const String &pdk_root = "");
     void stop_continuous();
+    bool reset_simulation();
     bool is_running() const;
 
     Dictionary xschem_to_spice(

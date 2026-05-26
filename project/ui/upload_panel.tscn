@@ -54,6 +54,11 @@ layout_mode = 2
 size_flags_horizontal = 3
 text = "Run Simulation"
 
+[node name="StopResetButton" type="Button" parent="Margin/VBox/ControlsCol/PrimaryRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Stop / Reset"
+
 [node name="WorkspaceRow" type="HBoxContainer" parent="Margin/VBox/ControlsCol" unique_id=226632639]
 layout_mode = 2
 size_flags_horizontal = 3

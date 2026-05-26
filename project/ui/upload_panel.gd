@@ -6,7 +6,23 @@ signal dark_mode_changed(dark_mode: bool)
 signal pdk_component_selected(component: Dictionary)
 
 @export var simulator_path: NodePath = NodePath("..")
+const SIM_SCRIPT_PATH := "res://simulator/circuit_simulator.gd"
+const DefaultExampleAssets := preload("res://examples/3bit_counter/default_example_assets.gd")
 const UPLOAD_DIR := "user://uploads"
+const DEFAULT_EXAMPLE_DIR := "res://examples/3bit_counter"
+const DEFAULT_EXAMPLE_SCHEMATIC := DEFAULT_EXAMPLE_DIR + "/3bit_counter.sch"
+const DEFAULT_EXAMPLE_SYMBOL_FILES := [
+	"flip_flop_ngspice.sym",
+	"half_adder_ngspice.sym",
+	"ipin.sym",
+	"lab_pin.sym",
+	"lab_wire.sym",
+	"opin.sym",
+	"title.sym",
+]
+
+@export var load_default_example_on_start: bool = true
+@export var default_example_schematic_path: String = DEFAULT_EXAMPLE_SCHEMATIC
 
 const WORKSPACE_EXT := ".cvw.zip"
 const WORKSPACE_MANIFEST := "manifest.json"
@@ -17,10 +33,11 @@ var NETLIST_EXTS: PackedStringArray = PackedStringArray(["spice", "cir", "net", 
 var SCHEMATIC_EXTS: PackedStringArray = PackedStringArray(["sch"])
 var SYMBOL_EXTS: PackedStringArray = PackedStringArray(["sym"])
 var XSCHEM_EXTS: PackedStringArray = PackedStringArray(["sch", "sym"])
-var SYMBOL_DIRS: PackedStringArray = PackedStringArray(["res://symbols", "res://symbols/sym"])
+var SYMBOL_DIRS: PackedStringArray = PackedStringArray(["res://symbols", "res://symbols/sym", DEFAULT_EXAMPLE_DIR])
 
 @onready var upload_button: Button = $Margin/VBox/ControlsCol/PrimaryRow/UploadButton
 @onready var run_button: Button = $Margin/VBox/ControlsCol/PrimaryRow/RunButton
+@onready var stop_reset_button: Button = $Margin/VBox/ControlsCol/PrimaryRow/StopResetButton
 @onready var save_ws_button: Button = $Margin/VBox/ControlsCol/WorkspaceRow/SaveWorkspaceButton
 @onready var load_ws_button: Button = $Margin/VBox/ControlsCol/WorkspaceRow/LoadWorkspaceButton
 @onready var clear_button: Button = $Margin/VBox/ControlsCol/UtilityRow/ClearButton
@@ -113,6 +130,7 @@ func _ready() -> void:
 
 	upload_button.pressed.connect(Callable(self, "_on_upload_pressed"))
 	run_button.pressed.connect(Callable(self, "_on_run_pressed"))
+	stop_reset_button.pressed.connect(Callable(self, "_on_stop_reset_pressed"))
 	clear_button.pressed.connect(Callable(self, "_on_clear_pressed"))
 	save_ws_button.pressed.connect(Callable(self, "_on_save_workspace_pressed"))
 	load_ws_button.pressed.connect(Callable(self, "_on_load_workspace_pressed"))
@@ -152,6 +170,9 @@ func _ready() -> void:
 			_log("[color=darkgreen][b]OK:[/b][/color] Web upload bridge detected.")
 		else:
 			_log("[color=#b56a00][b]Warning:[/b][/color] Web upload bridge not detected yet.")
+
+	if load_default_example_on_start:
+		call_deferred("_load_default_example_project")
 
 func set_pdk_manifest(manifest: Variant) -> void:
 	_pdk_manifest = manifest
@@ -401,11 +422,55 @@ func _stage_native_file(src_path: String) -> bool:
 	src.close()
 	return _stage_bytes(src_path.get_file(), bytes)
 
+func _load_default_example_project() -> void:
+	if not projects.is_empty():
+		return
+
+	var schematic_path := default_example_schematic_path.strip_edges()
+	if schematic_path == "":
+		return
+
+	var example_dir := schematic_path.get_base_dir()
+	for filename in DEFAULT_EXAMPLE_SYMBOL_FILES:
+		_stage_resource_file("%s/%s" % [example_dir, str(filename)])
+
+	if not _stage_resource_file(schematic_path):
+		return
+
+	_resolve_autogen_projects()
+	if not projects.is_empty():
+		_selected_project = projects.size() - 1
+		_rebuild_cards()
+
+	_refresh_status("example loaded: %s" % schematic_path.get_file(), StatusTone.OK)
+
+func _stage_resource_file(resource_path: String) -> bool:
+	var bytes := PackedByteArray()
+	if FileAccess.file_exists(resource_path):
+		var src := FileAccess.open(resource_path, FileAccess.READ)
+		if src == null:
+			push_warning("UploadPanel: failed to open bundled example file: " + resource_path)
+			return false
+		bytes = src.get_buffer(src.get_length())
+		src.close()
+	else:
+		var text := DefaultExampleAssets.get_file_text(resource_path.get_file())
+		if text == "":
+			push_warning("UploadPanel: bundled example file not found: " + resource_path)
+			return false
+		bytes = text.to_utf8_buffer()
+
+	return _stage_bytes_to_upload(resource_path.get_file(), bytes, false)
+
 func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
+	return _stage_bytes_to_upload(original_name, bytes, true)
+
+func _stage_bytes_to_upload(original_name: String, bytes: PackedByteArray, avoid_name_collision: bool) -> bool:
 	_ensure_upload_dir()
 	var safe_name := _sanitize_filename(original_name)
 	var user_path := "%s/%s" % [UPLOAD_DIR, safe_name]
-	user_path = _avoid_collision(user_path)
+	if avoid_name_collision:
+		user_path = _avoid_collision(user_path)
 
 	var f := FileAccess.open(user_path, FileAccess.WRITE)
 	if f == null:
@@ -1049,6 +1114,76 @@ func _on_run_pressed() -> void:
 
 	_refresh_status("simulation running", StatusTone.OK)
 	_log("[color=darkgreen][b]OK:[/b][/color] Continuous simulation started.")
+
+
+func _on_stop_reset_pressed() -> void:
+	_sim = _resolve_simulator()
+	if _sim == null:
+		_set_error("Could not find CircuitSimulator node.")
+		return
+
+	_refresh_status("resetting simulation...", StatusTone.WARN)
+	if _sim.has_method("reset_simulation"):
+		var ok := bool(_sim.call("reset_simulation"))
+		if not ok:
+			_set_error("ngspice reset failed.")
+			return
+	elif _sim.has_method("stop_continuous"):
+		_sim.call("stop_continuous")
+		_log("[color=#b56a00][b]Warning:[/b][/color] Native reset_simulation() is unavailable; replacing the simulator node for this reset.")
+		var replacement := await _replace_legacy_simulator(_sim)
+		if replacement == null:
+			_set_error("Could not recreate CircuitSimulator node.")
+			return
+		_sim = replacement
+		simulator_path = get_path_to(_sim)
+		_notify_simulator_replaced(_sim)
+	else:
+		_set_error("Resolved node lacks reset_simulation().")
+		return
+
+	_refresh_status("simulation reset", StatusTone.OK)
+	_log("[color=darkgreen][b]OK:[/b][/color] Simulation stopped and ngspice reset.")
+
+
+func _replace_legacy_simulator(old_sim: Node) -> Node:
+	var parent := old_sim.get_parent()
+	var replacement_name := str(old_sim.name)
+	if parent == null:
+		parent = get_tree().root
+	if replacement_name == "":
+		replacement_name = "CircuitSimulator"
+
+	old_sim.queue_free()
+	await get_tree().process_frame
+
+	var sim_script: Resource = load(SIM_SCRIPT_PATH)
+	if not (sim_script is GDScript):
+		return null
+
+	var created: Variant = (sim_script as GDScript).new()
+	if not (created is Node):
+		return null
+
+	var replacement := created as Node
+	replacement.name = replacement_name
+	parent.add_child(replacement)
+	return replacement
+
+
+func _notify_simulator_replaced(simulator: Node) -> void:
+	var root := get_tree().root
+	if root == null:
+		return
+
+	for node in root.find_children("*", "", true, false):
+		if not (node is Node):
+			continue
+		var n := node as Node
+		if n.has_method("set_simulator_node"):
+			n.call("set_simulator_node", simulator)
+		if n.has_method("reset_simulation_view"):
+			n.call("reset_simulation_view")
 
 
 func _log_spice_run_context(spice_entry: Dictionary) -> void:

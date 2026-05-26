@@ -8,8 +8,12 @@ extends Node3D
 
 const _SIM_SCRIPT_PATH := "res://simulator/circuit_simulator.gd"
 const _PDK_MANIFEST_LOADER_SCRIPT_PATH := "res://pdk/pdk_manifest_loader.gd"
+const DEFAULT_SCHEMATIC_PATH := "res://examples/3bit_counter/3bit_counter.sch"
 
 @export var scale_factor: float = 0.01
+@export var load_default_schematic_on_start: bool = false
+@export var default_schematic_path: String = DEFAULT_SCHEMATIC_PATH
+@export var load_pdk_manifest_on_start: bool = false
 
 # ---------- Shared state (read by helper scripts) ----------
 
@@ -22,6 +26,8 @@ var _materials: Dictionary = {}
 ## Search paths for .sym files.
 var _sym_search_paths: Array[String] = [
 	"user://pdk_symbols/",
+	"user://uploads/",
+	"res://examples/3bit_counter/",
 	"res://symbols/sym/",
 	"res://symbols/sym/sky130_fd_pr/",
 	"res://symbols/",
@@ -57,6 +63,8 @@ func _ready() -> void:
 	_scene_builder = VisSceneBuilder.new(self)
 	_setup_ui()
 	_setup_pdk_manifest_loader()
+	if load_default_schematic_on_start:
+		call_deferred("_load_default_schematic")
 
 
 # ---------- Schematic loading ----------
@@ -66,12 +74,53 @@ func load_schematic(path: String) -> bool:
 	if not parser.parse_file(path):
 		push_error("Failed to parse: " + path)
 		return false
-	await _wait_for_pdk_manifest_if_needed()
+	if _schematic_requires_pdk_manifest(parser):
+		await _wait_for_pdk_manifest_if_needed()
 	await _ensure_schematic_symbols_cached(parser)
 	_scene_builder.draw_circuit(parser, _floor)
 	print("Loaded schematic: %s  (%d components, %d wires)" % [
 		path, parser.components.size(), parser.wires.size()])
 	return true
+
+
+func _load_default_schematic() -> void:
+	var path := default_schematic_path.strip_edges()
+	if path == "":
+		return
+	if not FileAccess.file_exists(path):
+		push_warning("Visualizer: default schematic not found: " + path)
+		return
+	await load_schematic(path)
+
+
+func _schematic_requires_pdk_manifest(parser: Variant) -> bool:
+	if not OS.has_feature("web") or _pdk_manifest != null:
+		return false
+
+	for comp: Dictionary in parser.components:
+		var symbol_name := str(comp.get("symbol", ""))
+		var basename := symbol_name.get_file()
+		if symbol_name == "" or _has_local_symbol_definition(symbol_name, basename):
+			continue
+		return true
+
+	return false
+
+
+func _has_local_symbol_definition(symbol_name: String, basename: String) -> bool:
+	for search_path: String in _sym_search_paths:
+		var candidate := search_path + symbol_name
+		if FileAccess.file_exists(candidate):
+			return true
+		if basename != "":
+			candidate = search_path + basename
+			if FileAccess.file_exists(candidate):
+				return true
+
+	if basename != "" and _scene_builder != null:
+		return _scene_builder.find_sym_recursive("res://symbols", basename) != ""
+
+	return false
 
 
 func _wait_for_pdk_manifest_if_needed() -> void:
@@ -134,14 +183,7 @@ func _setup_ui() -> void:
 	# Locate or instantiate the simulator node.
 	_sim = _find_or_create_sim()
 	if _sim != null:
-		if _sim.has_signal("signal_names_ready"):
-			_sim.connect("signal_names_ready", Callable(self, "_on_signal_names_ready"))
-		if _sim.has_signal("simulation_data_ready"):
-			_sim.connect("simulation_data_ready", Callable(self, "_on_simulation_data_ready"))
-		if _sim.has_signal("simulation_started"):
-			_sim.connect("simulation_started", Callable(self, "_on_simulation_started"))
-		if _sim.has_signal("simulation_finished"):
-			_sim.connect("simulation_finished", Callable(self, "_on_simulation_finished"))
+		_connect_simulator_signals(_sim)
 
 	_sidebar = SidebarPanel.new()
 	_sidebar.name = "Sidebar"
@@ -154,6 +196,30 @@ func _setup_ui() -> void:
 	ui_layer.name = "UILayer"
 	get_parent().add_child.call_deferred(ui_layer)
 	ui_layer.add_child(_sidebar)
+
+
+func set_simulator_node(simulator: Node) -> void:
+	_sim = simulator
+	_connect_simulator_signals(_sim)
+
+
+func _connect_simulator_signals(simulator: Node) -> void:
+	if simulator == null:
+		return
+
+	var signal_handlers := {
+		"signal_names_ready": Callable(self, "_on_signal_names_ready"),
+		"simulation_data_ready": Callable(self, "_on_simulation_data_ready"),
+		"simulation_started": Callable(self, "_on_simulation_started"),
+		"simulation_finished": Callable(self, "_on_simulation_finished"),
+		"simulation_reset": Callable(self, "_on_simulation_reset"),
+	}
+
+	for signal_name: String in signal_handlers.keys():
+		if simulator.has_signal(signal_name):
+			var handler: Callable = signal_handlers[signal_name]
+			if not simulator.is_connected(signal_name, handler):
+				simulator.connect(signal_name, handler)
 
 
 func _find_or_create_sim() -> Node:
@@ -193,7 +259,7 @@ func _setup_pdk_manifest_loader() -> void:
 	_pdk_manifest_loader.symbol_loaded.connect(_on_pdk_symbol_loaded)
 	_pdk_manifest_loader.symbol_failed.connect(_on_pdk_symbol_failed)
 	_pdk_manifest_loader.symbols_cached.connect(_on_pdk_symbols_cached)
-	if OS.has_feature("web"):
+	if OS.has_feature("web") and load_pdk_manifest_on_start:
 		_pdk_manifest_loader.load_sky130_manifest()
 
 
@@ -219,6 +285,17 @@ func _on_simulation_finished() -> void:
 	print("Visualizer: simulation stopped.")
 
 
+func _on_simulation_reset() -> void:
+	reset_simulation_view()
+	print("Visualizer: simulation reset.")
+
+
+func reset_simulation_view() -> void:
+	_net_index.clear()
+	_time_index = -1
+	_reset_wire_brightness()
+
+
 func _on_pdk_manifest_loaded(manifest: Variant) -> void:
 	_pdk_manifest = manifest
 	if _sidebar != null:
@@ -232,10 +309,7 @@ func _on_pdk_manifest_loaded(manifest: Variant) -> void:
 
 
 func _on_pdk_manifest_failed(message: String) -> void:
-	if OS.has_feature("web"):
-		push_warning("Visualizer: " + message)
-	else:
-		print("Visualizer: " + message)
+	print("Visualizer: " + message)
 
 
 func _on_pdk_component_selected(component: Dictionary) -> void:

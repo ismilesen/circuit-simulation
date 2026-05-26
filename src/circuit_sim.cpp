@@ -680,6 +680,7 @@ void CircuitSimulator::_bind_methods() {
     ClassDB::bind_method(D_METHOD("run_continuous", "spice_path", "pdk_root"),
                          &CircuitSimulator::run_continuous, DEFVAL(""));
     ClassDB::bind_method(D_METHOD("stop_continuous"), &CircuitSimulator::stop_continuous);
+    ClassDB::bind_method(D_METHOD("reset_simulation"), &CircuitSimulator::reset_simulation);
     ClassDB::bind_method(D_METHOD("is_running"), &CircuitSimulator::is_running);
     ClassDB::bind_method(
         D_METHOD("xschem_to_spice", "schematic_path", "output_path", "xschemrc_path", "symbol_dirs"),
@@ -690,6 +691,7 @@ void CircuitSimulator::_bind_methods() {
 
     ADD_SIGNAL(MethodInfo("simulation_started"));
     ADD_SIGNAL(MethodInfo("simulation_finished"));
+    ADD_SIGNAL(MethodInfo("simulation_reset"));
     ADD_SIGNAL(MethodInfo("signal_names_ready",
         PropertyInfo(Variant::PACKED_STRING_ARRAY, "names")));
     ADD_SIGNAL(MethodInfo("simulation_data_ready",
@@ -1190,6 +1192,56 @@ bool CircuitSimulator::run_continuous(const String &spice_path, const String &pd
 }
 
 void CircuitSimulator::stop_continuous() { stop_continuous_thread(); }
+
+bool CircuitSimulator::reset_simulation() {
+    stop_continuous_thread();
+    continuous_sample_count.store(0);
+
+    {
+        std::lock_guard<std::mutex> lock(names_mutex);
+        callback_signal_names.clear();
+        callback_time_index.store(-1);
+    }
+
+    bool ok = true;
+    if (initialized) {
+#ifndef __EMSCRIPTEN__
+        if (ng_Command) {
+            std::lock_guard<std::mutex> lock(ng_command_mutex);
+            if (ng_Running && ng_Running()) {
+                ng_Command((char*)"bg_halt");
+                for (int i = 0; i < 50 && ng_Running(); i++)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            ok = (ng_Command((char*)"reset") == 0);
+        } else {
+            ok = false;
+        }
+#elif defined(__EMSCRIPTEN_PTHREADS__)
+        {
+            std::lock_guard<std::mutex> lock(ng_command_mutex);
+            if (ngSpice_running()) {
+                ngSpice_Command((char*)"bg_halt");
+                for (int i = 0; i < 50 && ngSpice_running(); i++)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            ok = (ngSpice_Command((char*)"reset") == 0);
+        }
+#else
+        if (ngSpice_running()) {
+            ngSpice_Command((char*)"halt");
+        }
+        ok = (ngSpice_Command((char*)"reset") == 0);
+#endif
+    }
+
+    if (!ok) {
+        UtilityFunctions::printerr("ngspice reset failed");
+        return false;
+    }
+    call_deferred("emit_signal", "simulation_reset");
+    return true;
+}
 
 bool CircuitSimulator::is_running() const {
 #ifndef __EMSCRIPTEN__
