@@ -1015,12 +1015,6 @@ func _on_run_pressed() -> void:
 		return
 	var spice_user_path := str(spice_entry["user_path"])
 
-	var switch_states: Dictionary = selected_proj.get("switch_states", {})
-	if not switch_states.is_empty():
-		var patched := _patch_spice_for_switches(spice_user_path, switch_states)
-		if patched != "":
-			spice_user_path = patched
-
 	var support_patched := _patch_spice_for_subcircuit_support(spice_user_path, selected_proj)
 	if support_patched != "":
 		spice_user_path = support_patched
@@ -1046,6 +1040,12 @@ func _on_run_pressed() -> void:
 	if not ok:
 		_set_error("run_continuous() failed.")
 		return
+
+	if _sim.has_method("set_switch_voltage"):
+		var sw_states: Dictionary = selected_proj.get("switch_states", {})
+		for btn_name_v in sw_states:
+			var voltage := 1.8 if bool(sw_states[btn_name_v]) else 0.0
+			_sim.call("set_switch_voltage", str(btn_name_v), voltage)
 
 	_refresh_status("simulation running", StatusTone.OK)
 	_log("[color=darkgreen][b]OK:[/b][/color] Continuous simulation started.")
@@ -1415,6 +1415,12 @@ func _on_switch_toggled(proj_idx: int, btn_name: String, on: bool) -> void:
 	var sw: Dictionary = projects[proj_idx].get("switch_states", {})
 	sw[btn_name] = on
 	projects[proj_idx]["switch_states"] = sw
+
+	# NEW: tell the running simulator immediately — no restart needed.
+	var sim := _resolve_simulator()
+	if sim != null and sim.has_method("set_switch_voltage"):
+		var voltage := 1.8 if on else 0.0
+		sim.call("set_switch_voltage", btn_name, voltage)
 
 func _on_slot_plus_pressed(proj_idx: int, slot_key: String) -> void:
 	_pending_slot_project = proj_idx
