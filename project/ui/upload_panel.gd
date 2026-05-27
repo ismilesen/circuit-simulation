@@ -7,22 +7,7 @@ signal pdk_component_selected(component: Dictionary)
 
 @export var simulator_path: NodePath = NodePath("..")
 const SIM_SCRIPT_PATH := "res://simulator/circuit_simulator.gd"
-const DefaultExampleAssets := preload("res://examples/3bit_counter/default_example_assets.gd")
 const UPLOAD_DIR := "user://uploads"
-const DEFAULT_EXAMPLE_DIR := "res://examples/3bit_counter"
-const DEFAULT_EXAMPLE_SCHEMATIC := DEFAULT_EXAMPLE_DIR + "/3bit_counter.sch"
-const DEFAULT_EXAMPLE_SYMBOL_FILES := [
-	"flip_flop_ngspice.sym",
-	"half_adder_ngspice.sym",
-	"ipin.sym",
-	"lab_pin.sym",
-	"lab_wire.sym",
-	"opin.sym",
-	"title.sym",
-]
-
-@export var load_default_example_on_start: bool = true
-@export var default_example_schematic_path: String = DEFAULT_EXAMPLE_SCHEMATIC
 
 const WORKSPACE_EXT := ".cvw.zip"
 const WORKSPACE_MANIFEST := "manifest.json"
@@ -33,7 +18,7 @@ var NETLIST_EXTS: PackedStringArray = PackedStringArray(["spice", "cir", "net", 
 var SCHEMATIC_EXTS: PackedStringArray = PackedStringArray(["sch"])
 var SYMBOL_EXTS: PackedStringArray = PackedStringArray(["sym"])
 var XSCHEM_EXTS: PackedStringArray = PackedStringArray(["sch", "sym"])
-var SYMBOL_DIRS: PackedStringArray = PackedStringArray(["res://symbols", "res://symbols/sym", DEFAULT_EXAMPLE_DIR])
+var SYMBOL_DIRS: PackedStringArray = PackedStringArray(["res://symbols", "res://symbols/sym"])
 
 @onready var upload_button: Button = $Margin/VBox/ControlsCol/PrimaryRow/UploadButton
 @onready var run_button: Button = $Margin/VBox/ControlsCol/PrimaryRow/RunButton
@@ -170,9 +155,6 @@ func _ready() -> void:
 			_log("[color=darkgreen][b]OK:[/b][/color] Web upload bridge detected.")
 		else:
 			_log("[color=#b56a00][b]Warning:[/b][/color] Web upload bridge not detected yet.")
-
-	if load_default_example_on_start:
-		call_deferred("_load_default_example_project")
 
 func set_pdk_manifest(manifest: Variant) -> void:
 	_pdk_manifest = manifest
@@ -422,55 +404,11 @@ func _stage_native_file(src_path: String) -> bool:
 	src.close()
 	return _stage_bytes(src_path.get_file(), bytes)
 
-func _load_default_example_project() -> void:
-	if not projects.is_empty():
-		return
-
-	var schematic_path := default_example_schematic_path.strip_edges()
-	if schematic_path == "":
-		return
-
-	var example_dir := schematic_path.get_base_dir()
-	for filename in DEFAULT_EXAMPLE_SYMBOL_FILES:
-		_stage_resource_file("%s/%s" % [example_dir, str(filename)])
-
-	if not _stage_resource_file(schematic_path):
-		return
-
-	_resolve_autogen_projects()
-	if not projects.is_empty():
-		_selected_project = projects.size() - 1
-		_rebuild_cards()
-
-	_refresh_status("example loaded: %s" % schematic_path.get_file(), StatusTone.OK)
-
-func _stage_resource_file(resource_path: String) -> bool:
-	var bytes := PackedByteArray()
-	if FileAccess.file_exists(resource_path):
-		var src := FileAccess.open(resource_path, FileAccess.READ)
-		if src == null:
-			push_warning("UploadPanel: failed to open bundled example file: " + resource_path)
-			return false
-		bytes = src.get_buffer(src.get_length())
-		src.close()
-	else:
-		var text := DefaultExampleAssets.get_file_text(resource_path.get_file())
-		if text == "":
-			push_warning("UploadPanel: bundled example file not found: " + resource_path)
-			return false
-		bytes = text.to_utf8_buffer()
-
-	return _stage_bytes_to_upload(resource_path.get_file(), bytes, false)
-
 func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
-	return _stage_bytes_to_upload(original_name, bytes, true)
-
-func _stage_bytes_to_upload(original_name: String, bytes: PackedByteArray, avoid_name_collision: bool) -> bool:
 	_ensure_upload_dir()
 	var safe_name := _sanitize_filename(original_name)
 	var user_path := "%s/%s" % [UPLOAD_DIR, safe_name]
-	if avoid_name_collision:
-		user_path = _avoid_collision(user_path)
+	user_path = _avoid_collision(user_path)
 
 	var f := FileAccess.open(user_path, FileAccess.WRITE)
 	if f == null:
