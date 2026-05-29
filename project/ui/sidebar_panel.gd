@@ -75,6 +75,17 @@ func set_pdk_manifest(manifest: Variant) -> void:
 		_upload_panel.set_pdk_manifest(manifest)
 
 
+func set_switch_state_from_scene(btn_name: String, on: bool) -> void:
+	if _upload_panel != null and _upload_panel.has_method("set_switch_state_from_scene"):
+		_upload_panel.call("set_switch_state_from_scene", btn_name, on)
+
+
+func get_switch_state_for_scene(btn_name: String) -> bool:
+	if _upload_panel != null and _upload_panel.has_method("get_switch_state_for_scene"):
+		return bool(_upload_panel.call("get_switch_state_for_scene", btn_name))
+	return false
+
+
 func _setup_toggle_button() -> void:
 	_toggle_button = Button.new()
 	_toggle_button.name = "ToggleSidebar"

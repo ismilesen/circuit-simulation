@@ -1422,6 +1422,45 @@ func _on_switch_toggled(proj_idx: int, btn_name: String, on: bool) -> void:
 		var voltage := 1.8 if on else 0.0
 		sim.call("set_switch_voltage", btn_name, voltage)
 
+
+func set_switch_state_from_scene(btn_name: String, on: bool) -> void:
+	var proj_idx := _selected_project
+	if proj_idx < 0 or proj_idx >= projects.size() or not _project_has_button(proj_idx, btn_name):
+		proj_idx = _find_project_with_button(btn_name)
+	if proj_idx < 0:
+		return
+
+	var sw: Dictionary = projects[proj_idx].get("switch_states", {})
+	if bool(sw.get(btn_name, false)) == on:
+		return
+	sw[btn_name] = on
+	projects[proj_idx]["switch_states"] = sw
+	_rebuild_cards.call_deferred()
+
+
+func get_switch_state_for_scene(btn_name: String) -> bool:
+	var proj_idx := _selected_project
+	if proj_idx < 0 or proj_idx >= projects.size() or not _project_has_button(proj_idx, btn_name):
+		proj_idx = _find_project_with_button(btn_name)
+	if proj_idx < 0:
+		return false
+	var sw: Dictionary = projects[proj_idx].get("switch_states", {})
+	return bool(sw.get(btn_name, false))
+
+
+func _find_project_with_button(btn_name: String) -> int:
+	for i: int in range(projects.size()):
+		if _project_has_button(i, btn_name):
+			return i
+	return -1
+
+
+func _project_has_button(proj_idx: int, btn_name: String) -> bool:
+	if proj_idx < 0 or proj_idx >= projects.size():
+		return false
+	var buttons: Array = projects[proj_idx].get("buttons", [])
+	return buttons.has(btn_name)
+
 func _on_slot_plus_pressed(proj_idx: int, slot_key: String) -> void:
 	_pending_slot_project = proj_idx
 	_pending_slot_key = slot_key

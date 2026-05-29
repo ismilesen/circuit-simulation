@@ -115,6 +115,8 @@ func draw_component(comp: Dictionary, parser) -> void:
 	symbol.rotation.y = -deg_to_rad(rot * 90.0)
 	if mirror:
 		symbol.scale.x = -1.0
+	if symbol.has_signal("symbol_clicked"):
+		symbol.symbol_clicked.connect(_vis._on_symbol_clicked)
 	_vis.add_child(symbol)
 
 	var comp_label: String = comp.get("label", "")

@@ -1,6 +1,8 @@
 class_name CircuitSymbol
 extends Node3D
 
+signal symbol_clicked(comp_data: Dictionary)
+
 ## Data-driven 3D circuit symbol built from a SymbolDefinition.
 ##
 ## Usage:
@@ -60,11 +62,93 @@ func setup(comp: Dictionary, definition: SymbolDefinition, scale: float, mat: St
 		mi.material_override = mat
 		add_child(mi)
 
+	if _is_clickable_button(comp):
+		_add_click_area(scale, compact_mos_pin_grid)
+
 
 func get_pin_position(pin_name: String) -> Vector3:
 	if pin_positions.has(pin_name):
 		return to_global(pin_positions[pin_name])
 	return global_position
+
+
+func _is_clickable_button(comp: Dictionary) -> bool:
+	return str(comp.get("type", "")).to_lower() == "button" \
+		or str(comp.get("symbol", "")).to_lower().find("button") != -1
+
+
+func _add_click_area(scale: float, compact_mos_pin_grid: bool) -> void:
+	var bounds := _symbol_bounds(compact_mos_pin_grid)
+	if bounds.is_empty():
+		return
+
+	var min_p: Vector2 = bounds["min"]
+	var max_p: Vector2 = bounds["max"]
+	var center := (min_p + max_p) / 2.0
+	var size := max_p - min_p
+	var padding := 18.0
+
+	var area := Area3D.new()
+	area.name = "ClickArea"
+	area.input_ray_pickable = true
+	area.collision_layer = 1
+	area.collision_mask = 0
+	area.position = Vector3(center.x * scale, 0.04, center.y * scale)
+
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(maxf(size.x + padding, 20.0) * scale, 0.12, maxf(size.y + padding, 20.0) * scale)
+
+	var collision := CollisionShape3D.new()
+	collision.shape = shape
+	area.add_child(collision)
+	area.input_event.connect(_on_click_area_input)
+	add_child(area)
+
+
+func _symbol_bounds(compact_mos_pin_grid: bool) -> Dictionary:
+	var bounds := {
+		"has_point": false,
+		"min": Vector2(1.0e20, 1.0e20),
+		"max": Vector2(-1.0e20, -1.0e20),
+	}
+
+	for line in sym_def.lines:
+		_accum_bound_point(bounds, line.p1, compact_mos_pin_grid)
+		_accum_bound_point(bounds, line.p2, compact_mos_pin_grid)
+	for box in sym_def.boxes:
+		_accum_bound_point(bounds, box.p1, compact_mos_pin_grid)
+		_accum_bound_point(bounds, box.p2, compact_mos_pin_grid)
+	for poly in sym_def.polygons:
+		for p: Vector2 in poly.points:
+			_accum_bound_point(bounds, p, compact_mos_pin_grid)
+	for arc in sym_def.arcs:
+		_accum_bound_point(bounds, Vector2(arc.cx - arc.radius, arc.cy - arc.radius), compact_mos_pin_grid)
+		_accum_bound_point(bounds, Vector2(arc.cx + arc.radius, arc.cy + arc.radius), compact_mos_pin_grid)
+
+	if not bool(bounds["has_point"]):
+		return {}
+	return {"min": bounds["min"], "max": bounds["max"]}
+
+
+func _accum_bound_point(bounds: Dictionary, raw_point: Vector2, compact_mos_pin_grid: bool) -> void:
+	var p := _schematic_point(raw_point, compact_mos_pin_grid)
+	var min_p: Vector2 = bounds["min"]
+	var max_p: Vector2 = bounds["max"]
+	min_p.x = minf(min_p.x, p.x)
+	min_p.y = minf(min_p.y, p.y)
+	max_p.x = maxf(max_p.x, p.x)
+	max_p.y = maxf(max_p.y, p.y)
+	bounds["min"] = min_p
+	bounds["max"] = max_p
+	bounds["has_point"] = true
+
+
+func _on_click_area_input(_camera: Node, event: InputEvent, _event_position: Vector3, _normal: Vector3, _shape_idx: int) -> void:
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
+			get_viewport().set_input_as_handled()
+			symbol_clicked.emit(comp_data)
 
 
 # ---------- Geometry Builders ----------

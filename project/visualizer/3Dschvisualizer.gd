@@ -39,6 +39,9 @@ var _net_index: Dictionary = {}
 ## Column index of the "time" vector (-1 = not found).
 var _time_index: int = -1
 
+## Button source name -> pressed state.
+var _switch_states: Dictionary = {}
+
 # ---------- References ----------
 var _sim: Node = null
 var _sidebar: SidebarPanel = null
@@ -52,6 +55,7 @@ const VMAX: float = 1.8
 
 
 func _ready() -> void:
+	get_viewport().physics_object_picking = true
 	_materials = VisMaterialFactory.build_materials()
 	_floor = VisMaterialFactory.create_floor(self)
 	_scene_builder = VisSceneBuilder.new(self)
@@ -300,6 +304,33 @@ func _on_simulation_data_ready(sample: PackedFloat64Array) -> void:
 		# Emission color: warm yellow, brightness scaled 0 → full.
 		mat.emission = Color(1.0, 0.95, 0.3)
 		mat.emission_energy_multiplier = 0.05 + t * 2.5
+
+
+func _on_symbol_clicked(comp: Dictionary) -> void:
+	if str(comp.get("type", "")).to_lower() != "button" \
+			and str(comp.get("symbol", "")).to_lower().find("button") == -1:
+		return
+
+	var source_name := str(comp.get("name", ""))
+	if source_name == "":
+		return
+
+	var current_on := bool(_switch_states.get(source_name, _get_sidebar_switch_state(source_name)))
+	var on := not current_on
+	_switch_states[source_name] = on
+	var voltage := 1.8 if on else 0.0
+
+	if _sim != null and _sim.has_method("set_switch_voltage"):
+		_sim.call("set_switch_voltage", source_name, voltage)
+
+	if _sidebar != null and _sidebar.has_method("set_switch_state_from_scene"):
+		_sidebar.call("set_switch_state_from_scene", source_name, on)
+
+
+func _get_sidebar_switch_state(source_name: String) -> bool:
+	if _sidebar != null and _sidebar.has_method("get_switch_state_for_scene"):
+		return bool(_sidebar.call("get_switch_state_for_scene", source_name))
+	return false
 
 
 # ---------- Helpers ----------

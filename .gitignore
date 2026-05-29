@@ -49,3 +49,9 @@ Thumbs.db
 # Library folders
 project/schematics/
 project/symbols/
+!project/symbols/
+project/symbols/*
+!project/symbols/sym/
+project/symbols/sym/*
+!project/symbols/sym/button/
+!project/symbols/sym/button/button.sym
