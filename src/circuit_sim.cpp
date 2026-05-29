@@ -80,6 +80,49 @@ std::string maybe_quote(const std::string &v, bool q) {
     return q ? "\"" + v + "\"" : v;
 }
 
+bool has_whitespace(const std::string &v) {
+    return std::any_of(v.begin(), v.end(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    });
+}
+
+bool parse_include_or_lib_line(const std::string &line,
+                               std::string &directive_out,
+                               std::string &path_out,
+                               std::string &section_out,
+                               bool &path_was_quoted_out) {
+    directive_out.clear();
+    path_out.clear();
+    section_out.clear();
+    path_was_quoted_out = false;
+
+    std::string t = trim_copy(line);
+    if (!(starts_with_ci(t, ".include") || starts_with_ci(t, ".lib"))) return false;
+
+    size_t i = 0;
+    while (i < t.size() && !std::isspace(static_cast<unsigned char>(t[i]))) i++;
+    directive_out = t.substr(0, i);
+    while (i < t.size() && std::isspace(static_cast<unsigned char>(t[i]))) i++;
+    if (i >= t.size()) return false;
+
+    if (t[i] == '"') {
+        path_was_quoted_out = true;
+        size_t end_quote = t.find('"', i + 1);
+        if (end_quote == std::string::npos) return false;
+        path_out = t.substr(i + 1, end_quote - (i + 1));
+        i = end_quote + 1;
+    } else {
+        size_t end_tok = i;
+        while (end_tok < t.size() && !std::isspace(static_cast<unsigned char>(t[end_tok]))) end_tok++;
+        path_out = t.substr(i, end_tok - i);
+        i = end_tok;
+    }
+
+    while (i < t.size() && std::isspace(static_cast<unsigned char>(t[i]))) i++;
+    if (i < t.size()) section_out = t.substr(i);
+    return !path_out.empty();
+}
+
 std::string replace_all_copy(std::string v, const std::string &needle, const std::string &rep) {
     size_t pos = 0;
     while ((pos = v.find(needle, pos)) != std::string::npos) {
@@ -165,14 +208,12 @@ std::string rewrite_include_or_lib(const std::string &line, const fs::path &base
     bool is_inc = starts_with_ci(t, ".include");
     bool is_lib = starts_with_ci(t, ".lib");
     if (!is_inc && !is_lib) return line;
-    std::istringstream iss(t);
-    std::string directive, path_tok;
-    iss >> directive >> path_tok;
-    if (path_tok.empty()) return line;
-    bool was_quoted = path_tok.size() >= 2 && path_tok.front() == '"' && path_tok.back() == '"';
-    std::string resolved = resolve_path_token(unquote_copy(path_tok), base_dir, pdk_root);
-    std::string rebuilt = directive + " " + maybe_quote(resolved, was_quoted);
-    if (is_lib) { std::string section; if (iss >> section) rebuilt += " " + section; }
+    std::string directive, raw_path, section;
+    bool was_quoted = false;
+    if (!parse_include_or_lib_line(t, directive, raw_path, section, was_quoted)) return line;
+    std::string resolved = resolve_path_token(raw_path, base_dir, pdk_root);
+    std::string rebuilt = directive + " " + maybe_quote(resolved, was_quoted || has_whitespace(resolved));
+    if (is_lib && !section.empty()) rebuilt += " " + section;
     return rebuilt;
 }
 
@@ -227,14 +268,12 @@ std::string rewrite_include_or_lib(const std::string &line, const std::string &b
     bool is_inc = starts_with_ci(t, ".include");
     bool is_lib = starts_with_ci(t, ".lib");
     if (!is_inc && !is_lib) return line;
-    std::istringstream iss(t);
-    std::string directive, path_tok;
-    iss >> directive >> path_tok;
-    if (path_tok.empty()) return line;
-    bool was_quoted = path_tok.size() >= 2 && path_tok.front() == '"' && path_tok.back() == '"';
-    std::string resolved = resolve_path_token(unquote_copy(path_tok), base_dir, pdk_root);
-    std::string rebuilt = directive + " " + maybe_quote(resolved, was_quoted);
-    if (is_lib) { std::string section; if (iss >> section) rebuilt += " " + section; }
+    std::string directive, raw_path, section;
+    bool was_quoted = false;
+    if (!parse_include_or_lib_line(t, directive, raw_path, section, was_quoted)) return line;
+    std::string resolved = resolve_path_token(raw_path, base_dir, pdk_root);
+    std::string rebuilt = directive + " " + maybe_quote(resolved, was_quoted || has_whitespace(resolved));
+    if (is_lib && !section.empty()) rebuilt += " " + section;
     return rebuilt;
 }
 
@@ -583,16 +622,14 @@ void expand_includes_recursive(const std::vector<std::string> &logical_lines,
             continue;
         }
 
-        std::istringstream iss(t);
         std::string directive, path_tok, section;
-        iss >> directive >> path_tok;
-        if (path_tok.empty()) {
+        bool ignored_path_was_quoted = false;
+        if (!parse_include_or_lib_line(t, directive, path_tok, section, ignored_path_was_quoted)) {
             out.push_back(orig);
             continue;
         }
-        if (is_lib) iss >> section;
 
-        std::string resolved = resolve_include_path(unquote_copy(path_tok), base_dir, pdk_root);
+        std::string resolved = resolve_include_path(path_tok, base_dir, pdk_root);
         std::vector<std::string> child_physical;
         if (!read_file_lines(resolved, child_physical)) {
             out.push_back(orig);
@@ -609,9 +646,66 @@ void expand_includes_recursive(const std::vector<std::string> &logical_lines,
         }
 
         out.push_back("* begin expanded " + directive + " " + resolved);
-        expand_includes_recursive(child_logical, dirname_for_path(resolved), pdk_root, out, depth + 1);
+        std::vector<std::string> child_expanded;
+        expand_includes_recursive(child_logical, dirname_for_path(resolved), pdk_root,
+                                  child_expanded, depth + 1);
+        for (const std::string &child_line : child_expanded) {
+            // xschem-exported include files often end with ".end"; drop it so the
+            // parent netlist is not terminated before top-level elements load.
+            if (to_lower_copy(trim_copy(child_line)) == ".end") continue;
+            out.push_back(child_line);
+        }
         out.push_back("* end expanded " + directive + " " + resolved);
     }
+}
+
+// ─── Switch / EXTERNAL voltage source helpers ────────────────────────────────
+
+// Returns true if a logical netlist line declares an EXTERNAL voltage source.
+// A qualifying line starts with V (voltage source element) and contains the
+// token "external" (case-insensitive) as a standalone word anywhere after the
+// node names.  Examples that match:
+//   VBUTTON1 OUT VGND external
+//   VCLK clk 0 DC 0 EXTERNAL
+// We deliberately require the V prefix so we never match comment lines or
+// subcircuit calls that happen to contain the string "external".
+bool is_external_vsource_line(const std::string &line) {
+    std::string t = trim_copy(line);
+    if (t.empty()) return false;
+    // SPICE element names starting with V are voltage sources.
+    if (std::tolower(static_cast<unsigned char>(t[0])) != 'v') return false;
+    // Check for the standalone token "external" anywhere in the token list.
+    std::istringstream iss(t);
+    std::string tok;
+    iss >> tok; // consume element name
+    while (iss >> tok) {
+        if (to_lower_copy(tok) == "external") return true;
+    }
+    return false;
+}
+
+// Extracts the lowercase SPICE element name from a line known to be a voltage
+// source declaration (first token, already lowercased).
+std::string extract_vsource_name(const std::string &line) {
+    std::istringstream iss(trim_copy(line));
+    std::string tok;
+    iss >> tok;
+    return to_lower_copy(tok);
+}
+
+// ngspice passes hierarchical names for devices inside subcircuits (e.g.
+// "x1.vbutton1"); switch_voltages keys use the flat element name from the
+// subcircuit definition ("vbutton1").
+double lookup_switch_voltage(const std::map<std::string, double> &voltages,
+    const std::string &node_name) {
+    auto it = voltages.find(node_name);
+    if (it != voltages.end()) return it->second;
+    const size_t dot = node_name.rfind('.');
+    if (dot != std::string::npos) {
+        it = voltages.find(node_name.substr(dot + 1));
+        if (it != voltages.end()) return it->second;
+    }
+    return 0.0;
 }
 
 } // namespace
@@ -674,6 +768,46 @@ static int ng_bg_thread_running(bool running, int /*id*/, void* /*user_data*/) {
     return 0;
 }
 
+// NEW ─── GetVSRCData callback ─────────────────────────────────────────────────
+//
+// ngspice calls this once per timestep for every voltage source declared with
+// the "EXTERNAL" keyword.  We look the source up in switch_voltages and write
+// back whatever the UI thread last set via set_switch_voltage().
+//
+// Parameters (from ngspice sharedspice.h):
+//   value    — write the desired voltage here (in volts)
+//   time     — current simulation time in seconds (unused; we give a DC level)
+//   nodeName — lowercase element name, e.g. "vbutton1"
+//   id       — ngspice instance id (unused)
+//   user_data — unused (we go through the singleton instead)
+//
+// Return 0 for success.  A non-zero return would abort the simulation.
+static int ng_get_vsrc_data(double *value, double /*time*/, char *nodeName,
+    int /*id*/, void* /*user_data*/) {
+    if (!value || !nodeName || !CircuitSimulator::instance) return 0;
+
+    std::string key = to_lower_copy(std::string(nodeName));
+
+    std::lock_guard<std::mutex> lock(CircuitSimulator::instance->switch_mutex);
+    *value = lookup_switch_voltage(CircuitSimulator::instance->switch_voltages, key);
+    return 0;
+}
+
+// Stub callbacks required by ngSpice_Init_Sync's API but not currently used.
+// ngspice needs non-null pointers or it may segfault on some builds.
+static int ng_get_isrc_data(double *value, double /*time*/, char* /*nodeName*/,
+                             int /*id*/, void* /*user_data*/) {
+    if (value) *value = 0.0;
+    return 0;
+}
+
+static int ng_get_sync_data(double /*time*/, double *deltaT, double /*oldDeltaT*/,
+                             int /*redoTrans*/, int /*id*/, int /*loc*/, void* /*user_data*/) {
+    // Returning 0 with an unchanged deltaT lets ngspice pick its own step size.
+    (void)deltaT;
+    return 0;
+}
+
 // ─── GDScript bindings ───────────────────────────────────────────────────────
 
 void CircuitSimulator::_bind_methods() {
@@ -688,6 +822,9 @@ void CircuitSimulator::_bind_methods() {
         DEFVAL(""),
         DEFVAL(PackedStringArray())
     );
+    // NEW: Expose set_switch_voltage so GDScript can toggle buttons mid-run.
+    ClassDB::bind_method(D_METHOD("set_switch_voltage", "source_name", "voltage"),
+                         &CircuitSimulator::set_switch_voltage);
 
     ADD_SIGNAL(MethodInfo("simulation_started"));
     ADD_SIGNAL(MethodInfo("simulation_finished"));
@@ -707,6 +844,7 @@ CircuitSimulator::CircuitSimulator() {
 #ifndef __EMSCRIPTEN__
     ngspice_handle            = nullptr;
     ng_Init                   = nullptr;
+    ng_InitSync               = nullptr;  // NEW
     ng_Command                = nullptr;
     ng_Circ                   = nullptr;
     ng_Running                = nullptr;
@@ -742,6 +880,9 @@ bool CircuitSimulator::load_ngspice_library() {
     ng_Command = (int  (*)(char*))  GetProcAddress(ngspice_handle, "ngSpice_Command");
     ng_Circ    = (int  (*)(char**)) GetProcAddress(ngspice_handle, "ngSpice_Circ");
     ng_Running = (bool (*)())       GetProcAddress(ngspice_handle, "ngSpice_running");
+    // NEW: Resolve ngSpice_Init_Sync — soft-fail on older ngspice builds.
+    ng_InitSync = (int (*)(GetVSRCData*, GetISRCData*, GetSyncData*, int*, void*))
+                   GetProcAddress(ngspice_handle, "ngSpice_Init_Sync");
 #else
     // Linux / macOS
     std::vector<std::string> candidates;
@@ -780,11 +921,18 @@ bool CircuitSimulator::load_ngspice_library() {
     ng_Command = (int  (*)(char*))  dlsym(ngspice_handle, "ngSpice_Command");
     ng_Circ    = (int  (*)(char**)) dlsym(ngspice_handle, "ngSpice_Circ");
     ng_Running = (bool (*)())       dlsym(ngspice_handle, "ngSpice_running");
+    // NEW: Resolve ngSpice_Init_Sync — soft-fail on older ngspice builds.
+    ng_InitSync = (int (*)(GetVSRCData*, GetISRCData*, GetSyncData*, int*, void*))
+                   dlsym(ngspice_handle, "ngSpice_Init_Sync");
 #endif
     if (!ng_Init || !ng_Command || !ng_Circ) {
         UtilityFunctions::printerr("Failed to resolve required ngspice symbols");
         unload_ngspice_library();
         return false;
+    }
+    if (!ng_InitSync) {
+        // Warn but don't abort — EXTERNAL sources simply won't work.
+        UtilityFunctions::print("Warning: ngSpice_Init_Sync not found; EXTERNAL voltage sources will be unsupported.");
     }
     return true;
 }
@@ -795,7 +943,8 @@ void CircuitSimulator::unload_ngspice_library() {
 #else
     if (ngspice_handle) { dlclose(ngspice_handle);     ngspice_handle = nullptr; }
 #endif
-    ng_Init = nullptr; ng_Command = nullptr; ng_Circ = nullptr; ng_Running = nullptr;
+    ng_Init = nullptr; ng_InitSync = nullptr; ng_Command = nullptr;
+    ng_Circ = nullptr; ng_Running = nullptr;
 }
 #endif // !__EMSCRIPTEN__
 
@@ -823,6 +972,39 @@ bool CircuitSimulator::initialize_ngspice() {
 #endif
         return false;
     }
+
+    // NEW ── Register the EXTERNAL voltage-source callback.
+    //
+    // ngSpice_Init_Sync must be called AFTER ngSpice_Init and BEFORE the first
+    // ngSpice_Circ/ngSpice_Command that starts a transient run.  Calling it
+    // here, once at initialisation time, satisfies both constraints.
+    //
+    // The `int ident` parameter is an arbitrary integer ngspice passes back to
+    // the callbacks; we pass 0 and ignore it in the callbacks.
+    {
+        int sync_ident = 0;
+#ifndef __EMSCRIPTEN__
+        if (ng_InitSync) {
+            int sync_ret = ng_InitSync(ng_get_vsrc_data, ng_get_isrc_data,
+                                       ng_get_sync_data, &sync_ident, this);
+            if (sync_ret != 0) {
+                UtilityFunctions::printerr("ngSpice_Init_Sync failed: " + String::num_int64(sync_ret));
+                // Non-fatal: simulation will still run; EXTERNAL sources default to 0 V.
+            } else {
+                UtilityFunctions::print("ngspice EXTERNAL voltage-source callbacks registered.");
+            }
+        }
+#else
+        int sync_ret = ngSpice_Init_Sync(ng_get_vsrc_data, ng_get_isrc_data,
+                                         ng_get_sync_data, &sync_ident, this);
+        if (sync_ret != 0) {
+            UtilityFunctions::printerr("ngSpice_Init_Sync failed: " + String::num_int64(sync_ret));
+        } else {
+            UtilityFunctions::print("ngspice EXTERNAL voltage-source callbacks registered.");
+        }
+#endif
+    }
+
     initialized = true;
     UtilityFunctions::print("ngspice initialized");
     return true;
@@ -1011,6 +1193,27 @@ bool CircuitSimulator::run_continuous(const String &spice_path, const String &pd
     std::map<std::string, std::string> sky130_selected_model_lines;
     int sky130_model_rewrite_count = 0;
 #endif
+
+    // NEW ── Scan expanded netlist for EXTERNAL voltage sources and pre-populate
+    // switch_voltages.  This must happen before we hand the netlist to ngSpice_Circ
+    // so that the very first timestep's callback has a valid entry to look up.
+    //
+    // We clear any state from a previous run first; switches always start at 0 V
+    // (off) at the beginning of each simulation.  The GDScript side may call
+    // set_switch_voltage() immediately after run_continuous() returns to restore
+    // previous toggle states if desired.
+    {
+        std::lock_guard<std::mutex> lock(switch_mutex);
+        switch_voltages.clear();
+        for (const std::string &line : expanded_lines) {
+            if (is_external_vsource_line(line)) {
+                std::string name = extract_vsource_name(line);
+                switch_voltages[name] = 0.0;
+                UtilityFunctions::print("CircuitSimulator: registered EXTERNAL source '" +
+                                        String(name.c_str()) + "' (initial voltage 0 V).");
+            }
+        }
+    }
 
     std::vector<std::string> out_lines;
     bool inside_control = false;
@@ -1295,4 +1498,28 @@ void CircuitSimulator::ingest_sample(const PackedFloat64Array &sample) {
     if (count % SIMULATION_DATA_EMIT_STRIDE == 0) {
         call_deferred("emit_signal", "simulation_data_ready", sample);
     }
+}
+
+// NEW ─── Switch voltage control ───────────────────────────────────────────────
+
+void CircuitSimulator::set_switch_voltage(const String &source_name, double voltage) {
+    // Convert the GDScript-supplied name to a lowercase std::string to match
+    // the key format used in switch_voltages (ngspice passes names in lowercase).
+    CharString utf8 = source_name.to_lower().utf8();
+    std::string key(utf8.get_data());
+
+    std::lock_guard<std::mutex> lock(switch_mutex);
+    auto it = switch_voltages.find(key);
+    if (it == switch_voltages.end()) {
+        // The source name wasn't found in the current netlist.  This is not an
+        // error (the GDScript may call this before run_continuous or with a
+        // mistyped name); we just log and ignore rather than inserting a spurious
+        // entry that would never be read by a callback.
+        UtilityFunctions::print("CircuitSimulator: set_switch_voltage: source '" +
+                                String(key.c_str()) + "' not registered in current netlist (no-op).");
+        return;
+    }
+    it->second = voltage;
+    UtilityFunctions::print("CircuitSimulator: set_switch_voltage: '" +
+                            String(key.c_str()) + "' → " + String::num_real(voltage) + " V");
 }
