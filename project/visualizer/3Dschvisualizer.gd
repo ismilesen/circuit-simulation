@@ -39,9 +39,6 @@ var _net_index: Dictionary = {}
 ## Column index of the "time" vector (-1 = not found).
 var _time_index: int = -1
 
-## Button source name -> pressed state.
-var _switch_states: Dictionary = {}
-
 # ---------- References ----------
 var _sim: Node = null
 var _sidebar: SidebarPanel = null
@@ -53,9 +50,15 @@ var _pdk_manifest: Variant = null
 # Voltage scale (sky130 VDD)
 const VMAX: float = 1.8
 
+# ---------- Oscilloscope state ----------
+var _oscilloscope: OscilloscopePanel = null
+var _selected_net: String = ""
+var _mouse_press_pos: Vector2 = Vector2.ZERO
+var _click_was_drag: bool = false
+const _DRAG_THRESHOLD := 8.0
+
 
 func _ready() -> void:
-	get_viewport().physics_object_picking = true
 	_materials = VisMaterialFactory.build_materials()
 	_floor = VisMaterialFactory.create_floor(self)
 	_scene_builder = VisSceneBuilder.new(self)
@@ -233,6 +236,8 @@ func _on_simulation_started() -> void:
 	_net_index.clear()
 	_time_index = -1
 	_reset_wire_brightness()
+	if _oscilloscope != null and _selected_net != "":
+		_oscilloscope.setup(_selected_net)
 	print("Visualizer: simulation running.")
 
 
@@ -333,32 +338,88 @@ func _on_simulation_data_ready(sample: PackedFloat64Array) -> void:
 		mat.emission = Color(1.0, 0.95, 0.3)
 		mat.emission_energy_multiplier = 0.05 + t * 2.5
 
+	if _oscilloscope != null and _oscilloscope.visible and _selected_net != "":
+		var net_col: int = _net_index.get(_selected_net, -1)
+		if net_col >= 0 and net_col < sample.size():
+			var time_val: float = 0.0
+			if _time_index >= 0 and _time_index < sample.size():
+				time_val = float(sample[_time_index])
+			_oscilloscope.push_sample(time_val, float(sample[net_col]))
 
-func _on_symbol_clicked(comp: Dictionary) -> void:
-	if str(comp.get("type", "")).to_lower() != "button" \
-			and str(comp.get("symbol", "")).to_lower().find("button") == -1:
+
+# ---------- Wire selection & oscilloscope ----------
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			_mouse_press_pos = event.position
+			_click_was_drag = false
+		else:
+			if not _click_was_drag:
+				_try_select_wire_at(event.position)
+	elif event is InputEventMouseMotion \
+			and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		if (_mouse_press_pos - event.position).length() > _DRAG_THRESHOLD:
+			_click_was_drag = true
+
+
+func _try_select_wire_at(screen_pos: Vector2) -> void:
+	var camera := get_viewport().get_camera_3d()
+	if camera == null:
 		return
-
-	var source_name := str(comp.get("name", ""))
-	if source_name == "":
+	var space := get_world_3d().direct_space_state
+	var origin := camera.project_ray_origin(screen_pos)
+	var dir    := camera.project_ray_normal(screen_pos)
+	var params := PhysicsRayQueryParameters3D.create(origin, origin + dir * 200.0)
+	var hit    := space.intersect_ray(params)
+	if hit.is_empty():
 		return
-
-	var current_on := bool(_switch_states.get(source_name, _get_sidebar_switch_state(source_name)))
-	var on := not current_on
-	_switch_states[source_name] = on
-	var voltage := 1.8 if on else 0.0
-
-	if _sim != null and _sim.has_method("set_switch_voltage"):
-		_sim.call("set_switch_voltage", source_name, voltage)
-
-	if _sidebar != null and _sidebar.has_method("set_switch_state_from_scene"):
-		_sidebar.call("set_switch_state_from_scene", source_name, on)
+	var net := _net_from_collider(hit["collider"] as Node)
+	if net.is_empty():
+		return
+	_open_oscilloscope_for_net(net)
 
 
-func _get_sidebar_switch_state(source_name: String) -> bool:
-	if _sidebar != null and _sidebar.has_method("get_switch_state_for_scene"):
-		return bool(_sidebar.call("get_switch_state_for_scene", source_name))
-	return false
+func _net_from_collider(node: Node) -> String:
+	if node == null:
+		return ""
+	if node.has_meta("sim_net"):
+		return str(node.get_meta("sim_net"))
+	var parent := node.get_parent()
+	if parent != null and parent.has_meta("sim_net"):
+		return str(parent.get_meta("sim_net"))
+	return ""
+
+
+func _open_oscilloscope_for_net(net: String) -> void:
+	if _oscilloscope == null:
+		_create_oscilloscope()
+	if _oscilloscope == null:
+		return
+	_selected_net = net
+	_oscilloscope.setup(net)
+
+
+func _create_oscilloscope() -> void:
+	_oscilloscope = OscilloscopePanel.new()
+	_oscilloscope.name = "OscilloscopePanel"
+	_oscilloscope.close_requested.connect(_on_oscilloscope_closed)
+	var ui_layer := _find_ui_layer()
+	if ui_layer != null:
+		ui_layer.add_child(_oscilloscope)
+	else:
+		get_parent().add_child(_oscilloscope)
+
+
+func _find_ui_layer() -> CanvasLayer:
+	for child: Node in get_parent().get_children():
+		if child is CanvasLayer and child.name == "UILayer":
+			return child as CanvasLayer
+	return null
+
+
+func _on_oscilloscope_closed() -> void:
+	_selected_net = ""
 
 
 # ---------- Helpers ----------

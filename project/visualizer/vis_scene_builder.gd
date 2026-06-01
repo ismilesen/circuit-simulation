@@ -67,6 +67,18 @@ func draw_wire(wire: Dictionary) -> void:
 
 	mi.position = (p1 + p2) / 2.0
 	mi.rotation.y = -atan2(direction.z, direction.x)
+
+	# Physics body so raycasts can detect wire clicks.
+	var body := StaticBody3D.new()
+	var col := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(length, 0.04, 0.04)
+	col.shape = shape
+	body.add_child(col)
+	if net_key != "":
+		body.set_meta("sim_net", net_key)
+	mi.add_child(body)
+
 	_vis.add_child(mi)
 
 	draw_connection_dot(p1)
@@ -115,8 +127,6 @@ func draw_component(comp: Dictionary, parser) -> void:
 	symbol.rotation.y = -deg_to_rad(rot * 90.0)
 	if mirror:
 		symbol.scale.x = -1.0
-	if symbol.has_signal("symbol_clicked"):
-		symbol.symbol_clicked.connect(_vis._on_symbol_clicked)
 	_vis.add_child(symbol)
 
 	var comp_label: String = comp.get("label", "")
