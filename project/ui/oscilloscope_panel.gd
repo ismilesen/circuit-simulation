@@ -98,8 +98,11 @@ func setup(net_name: String) -> void:
 	if _waveform != null:
 		_waveform.queue_redraw()
 	show()
-	var vp := get_viewport_rect().size
-	position = Vector2(vp.x - size.x - 20.0, vp.y - size.y - 20.0)
+	var vp := get_viewport().get_visible_rect().size
+	position = Vector2(
+		maxf(0.0, vp.x - size.x - 20.0),
+		maxf(0.0, vp.y - size.y - 20.0)
+	)
 
 
 ## Append one (time, voltage) sample to the rolling buffer.
