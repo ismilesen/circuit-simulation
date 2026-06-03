@@ -46,6 +46,7 @@ var _floor: MeshInstance3D = null
 var _scene_builder: VisSceneBuilder
 var _pdk_manifest_loader: Node = null
 var _pdk_manifest: Variant = null
+var _ui_layer: CanvasLayer = null
 
 # Voltage scale (sky130 VDD)
 const VMAX: float = 1.8
@@ -149,11 +150,11 @@ func _setup_ui() -> void:
 	_sidebar.spice_paired.connect(_on_spice_paired)
 	_sidebar.pdk_component_selected.connect(_on_pdk_component_selected)
 
-	var ui_layer := CanvasLayer.new()
-	ui_layer.layer = 10
-	ui_layer.name = "UILayer"
-	get_parent().add_child.call_deferred(ui_layer)
-	ui_layer.add_child(_sidebar)
+	_ui_layer = CanvasLayer.new()
+	_ui_layer.layer = 10
+	_ui_layer.name = "UILayer"
+	get_parent().add_child.call_deferred(_ui_layer)
+	_ui_layer.add_child(_sidebar)
 
 
 func set_simulator_node(simulator: Node) -> void:
@@ -404,18 +405,10 @@ func _create_oscilloscope() -> void:
 	_oscilloscope = OscilloscopePanel.new()
 	_oscilloscope.name = "OscilloscopePanel"
 	_oscilloscope.close_requested.connect(_on_oscilloscope_closed)
-	var ui_layer := _find_ui_layer()
-	if ui_layer != null:
-		ui_layer.add_child(_oscilloscope)
+	if _ui_layer != null:
+		_ui_layer.add_child(_oscilloscope)
 	else:
-		get_parent().add_child(_oscilloscope)
-
-
-func _find_ui_layer() -> CanvasLayer:
-	for child: Node in get_parent().get_children():
-		if child is CanvasLayer and child.name == "UILayer":
-			return child as CanvasLayer
-	return null
+		get_tree().root.add_child(_oscilloscope)
 
 
 func _on_oscilloscope_closed() -> void:
