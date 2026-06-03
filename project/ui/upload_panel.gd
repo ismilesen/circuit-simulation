@@ -13,12 +13,32 @@ const WORKSPACE_EXT := ".cvw.zip"
 const WORKSPACE_MANIFEST := "manifest.json"
 const WORKSPACE_FILES_DIR := "files/"
 const WEB_PDK_CACHE_ROOT := "user://pdks/sky130"
+const XSCHEM_SYMBOL_CACHE_DIR := "user://xschem_symbols"
+const SKY130_PRIMITIVE_PREFIX := "sky130_fd_pr__"
+const SKY130_KNOWN_PRIMITIVE_SUBCKTS := [
+	"sky130_fd_pr__nfet_01v8",
+	"sky130_fd_pr__pfet_01v8",
+]
+const BUILTIN_XSCHEM_SYMBOLS := [
+	"devices/code.sym",
+	"devices/code_shown.sym",
+	"devices/netlist.sym",
+	"devices/netlist_at_end.sym",
+	"devices/netlist_not_shown.sym",
+	"devices/netlist_not_shown_at_end.sym",
+	"devices/title.sym",
+	"iopin.sym",
+	"ipin.sym",
+	"lab_pin.sym",
+	"lab_wire.sym",
+	"opin.sym"
+]
 
 var NETLIST_EXTS: PackedStringArray = PackedStringArray(["spice", "cir", "net", "txt", "lib", "model", "mod"])
 var SCHEMATIC_EXTS: PackedStringArray = PackedStringArray(["sch"])
 var SYMBOL_EXTS: PackedStringArray = PackedStringArray(["sym"])
 var XSCHEM_EXTS: PackedStringArray = PackedStringArray(["sch", "sym"])
-var SYMBOL_DIRS: PackedStringArray = PackedStringArray(["res://symbols", "res://symbols/sym"])
+var SYMBOL_DIRS: PackedStringArray = PackedStringArray(["user://xschem_symbols", "res://symbols", "res://symbols/sym", "user://pdk_symbols"])
 
 @onready var upload_button: Button = $Margin/VBox/ControlsCol/PrimaryRow/UploadButton
 @onready var run_button: Button = $Margin/VBox/ControlsCol/PrimaryRow/RunButton
@@ -456,28 +476,29 @@ func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
 # -------------------------------------------------------------------
 
 func _assign_spice(slot: Dictionary) -> void:
-	var basename := (slot["display"] as String).get_basename()
+	var original_basename := (slot["display"] as String).get_basename()
+	var primary_slot := _maybe_wrap_subckt_only_netlist(slot, "uploaded netlist")
 	for i in projects.size():
 		var proj: Dictionary = projects[i]
-		if str(proj.get("name", "")) != basename:
+		if str(proj.get("name", "")) != original_basename:
 			continue
-		proj["spice"] = slot
+		proj["spice"] = primary_slot
 		proj["complete"] = true
 		projects[i] = proj
 		_selected_project = i
-		spice_paired.emit(str(slot.get("user_path", "")))
-		_log("[color=#336699][b]Info:[/b][/color] Replaced SPICE for project '%s'." % basename)
+		spice_paired.emit(str(primary_slot.get("user_path", "")))
+		_log("[color=#336699][b]Info:[/b][/color] Replaced SPICE for project '%s'." % original_basename)
 		return
 
 	projects.append({
-		"name": basename,
+		"name": original_basename,
 		"xschem": null,
-		"spice": slot,
+		"spice": primary_slot,
 		"complete": true,
 		"buttons": [],
 		"switch_states": {}
 	})
-	spice_paired.emit(str(slot.get("user_path", "")))
+	spice_paired.emit(str(primary_slot.get("user_path", "")))
 
 func _assign_support_file(slot: Dictionary) -> void:
 	var path := str(slot.get("user_path", ""))
@@ -532,7 +553,14 @@ func _analyze_spice_file(user_path: String) -> Dictionary:
 	var report: Dictionary = {
 		"subckt_defs": [],
 		"subckt_calls": [],
-		"include_paths": []
+		"include_paths": [],
+		"subckts": [],
+		"primary_subckt": {},
+		"top_level_elements": [],
+		"analysis_directives": [],
+		"has_top_level_circuit": false,
+		"has_analysis": false,
+		"is_single_subckt_only": false
 	}
 	var f := FileAccess.open(user_path, FileAccess.READ)
 	if f == null:
@@ -546,8 +574,19 @@ func _analyze_spice_file(user_path: String) -> Dictionary:
 	var defs: Dictionary = {}
 	var calls: Dictionary = {}
 	var includes: Dictionary = {}
+	var subckts: Array[Dictionary] = []
+	var subckt_stack: Array[Dictionary] = []
+	var top_elements: Array[String] = []
+	var analyses: Dictionary = {}
 	for raw_line in lines:
-		var line := _strip_spice_comment(str(raw_line)).strip_edges()
+		var raw_text := str(raw_line)
+		var pininfo := _extract_pininfo(raw_text)
+		if not pininfo.is_empty() and not subckts.is_empty():
+			var last_subckt := subckts[subckts.size() - 1]
+			last_subckt["pininfo"] = pininfo
+			subckts[subckts.size() - 1] = last_subckt
+
+		var line := _strip_spice_comment(raw_text).strip_edges()
 		if line == "":
 			continue
 		var lower := line.to_lower()
@@ -555,20 +594,84 @@ func _analyze_spice_file(user_path: String) -> Dictionary:
 			var parts := line.split(" ", false)
 			if parts.size() >= 2:
 				defs[str(parts[1]).to_lower()] = str(parts[1])
+				var ports: Array[String] = []
+				for i in range(2, parts.size()):
+					var tok := str(parts[i]).strip_edges()
+					if tok == "" or tok.find("=") >= 0 or tok.to_lower() == "params:":
+						continue
+					ports.append(tok)
+				var subckt: Dictionary = {
+					"name": str(parts[1]),
+					"ports": ports,
+					"pininfo": {}
+				}
+				subckts.append(subckt)
+				subckt_stack.append(subckt)
+			continue
+		if lower.begins_with(".ends"):
+			if not subckt_stack.is_empty():
+				subckt_stack.pop_back()
 			continue
 		if lower.begins_with(".include") or lower.begins_with(".lib"):
 			var include_path := _extract_include_path(line)
 			if include_path != "":
 				includes[include_path.to_lower()] = include_path
 			continue
+		if _is_analysis_directive(lower):
+			analyses[lower.split(" ", false)[0]] = lower.split(" ", false)[0]
+			continue
 		if lower.begins_with("x"):
 			var subckt_name := _extract_subckt_call_name(line)
 			if subckt_name != "":
 				calls[subckt_name.to_lower()] = subckt_name
+		if subckt_stack.is_empty() and _is_top_level_circuit_line(line):
+			top_elements.append(line)
 	report["subckt_defs"] = _lookup_values(defs)
 	report["subckt_calls"] = _lookup_values(calls)
 	report["include_paths"] = _lookup_values(includes)
+	report["subckts"] = subckts
+	if not subckts.is_empty():
+		report["primary_subckt"] = subckts[0]
+	report["top_level_elements"] = top_elements
+	report["analysis_directives"] = _lookup_values(analyses)
+	report["has_top_level_circuit"] = not top_elements.is_empty()
+	report["has_analysis"] = not analyses.is_empty()
+	report["is_single_subckt_only"] = subckts.size() == 1 and top_elements.is_empty() and analyses.is_empty()
 	return report
+
+func _extract_pininfo(raw_line: String) -> Dictionary:
+	var trimmed := raw_line.strip_edges()
+	if not trimmed.to_lower().begins_with("*.pininfo"):
+		return {}
+	var pininfo: Dictionary = {}
+	var parts := trimmed.substr(9).strip_edges().split(" ", false)
+	for part_v in parts:
+		var part := str(part_v).strip_edges()
+		var colon := part.rfind(":")
+		if colon <= 0 or colon >= part.length() - 1:
+			continue
+		var name := part.substr(0, colon)
+		var direction := part.substr(colon + 1).to_upper()
+		pininfo[name] = direction
+	return pininfo
+
+func _is_analysis_directive(lower_line: String) -> bool:
+	var token := lower_line.split(" ", false)[0]
+	return token == ".tran" \
+		or token == ".dc" \
+		or token == ".ac" \
+		or token == ".op" \
+		or token == ".tf" \
+		or token == ".noise" \
+		or token == ".pz" \
+		or token == ".sens"
+
+func _is_top_level_circuit_line(line: String) -> bool:
+	var trimmed := line.strip_edges()
+	if trimmed == "":
+		return false
+	var first := trimmed.substr(0, 1).to_upper()
+	return "RCLVIEXGHFBDQJMSO".contains(first)
 
 func _spice_logical_lines(physical: Array[String]) -> Array[String]:
 	var logical: Array[String] = []
@@ -635,11 +738,17 @@ func _check_project_subcircuit_files(proj: Dictionary, prompt: bool = true) -> D
 
 	for include_v in (root_analysis.get("include_paths", []) as Array):
 		var include_path := str(include_v)
+		if _is_bundled_sky130_model_include(include_path):
+			for primitive: String in SKY130_KNOWN_PRIMITIVE_SUBCKTS:
+				definitions[primitive] = primitive
+			continue
 		if not _include_file_is_available(include_path, spice_path):
 			missing_includes[include_path.to_lower()] = include_path
 
 	var missing_subckts: Dictionary = {}
 	for call_key in calls.keys():
+		if _is_bundled_sky130_mos_primitive(call_key):
+			continue
 		if not definitions.has(call_key):
 			missing_subckts[call_key] = calls[call_key]
 
@@ -651,6 +760,19 @@ func _check_project_subcircuit_files(proj: Dictionary, prompt: bool = true) -> D
 	if prompt and not bool(report["ok"]):
 		_prompt_missing_subcircuit_files(proj, report)
 	return report
+
+func _is_bundled_sky130_mos_primitive(call_name: String) -> bool:
+	var lower := call_name.to_lower()
+	if not lower.begins_with(SKY130_PRIMITIVE_PREFIX):
+		return false
+	return lower.find("nfet") >= 0 or lower.find("pfet") >= 0
+
+func _is_bundled_sky130_model_include(include_path: String) -> bool:
+	var lower := include_path.to_lower()
+	return lower.find("sky130.lib.spice") >= 0 \
+		or lower.find("sky130_fd_pr__") >= 0 \
+		or lower.find("libs.tech/ngspice") >= 0 \
+		or lower.find("libs.ref/sky130_fd_pr/spice") >= 0
 
 func _analysis_for_entry(entry: Dictionary) -> Dictionary:
 	var analysis_v: Variant = entry.get("spice_analysis", null)
@@ -797,10 +919,11 @@ func _assign_to_pending_slot(slot: Dictionary) -> void:
 		if not NETLIST_EXTS.has(ext):
 			_set_error("Expected a spice/netlist file (.spice/.cir/.net/.txt/.lib/.model/.mod) for this slot.")
 			return
-		proj["spice"] = slot
+		var primary_slot := _maybe_wrap_subckt_only_netlist(slot, "uploaded netlist")
+		proj["spice"] = primary_slot
 		proj["name"] = (slot["display"] as String).get_basename()
 		proj["complete"] = true
-		spice_paired.emit(str(slot.get("user_path", "")))
+		spice_paired.emit(str(primary_slot.get("user_path", "")))
 
 	elif key == "xschem":
 		if not SCHEMATIC_EXTS.has(ext):
@@ -845,6 +968,7 @@ func _auto_generate_spice(proj: Dictionary) -> bool:
 		return false
 
 	_ensure_upload_dir()
+	_ensure_xschem_symbol_cache()
 	var base := str(xschem_slot.get("display", "schematic")).get_basename()
 	var out_user_path := _avoid_collision("%s/%s.spice" % [UPLOAD_DIR, base])
 	var sch_os_path := ProjectSettings.globalize_path(sch_user_path)
@@ -878,13 +1002,235 @@ func _auto_generate_spice(proj: Dictionary) -> bool:
 		"ext": "spice",
 		"autogenerated": true
 	}
-	proj["spice"] = spice_slot
+	spice_slot["spice_analysis"] = _analyze_spice_file(out_user_path)
+	var primary_slot := _maybe_wrap_subckt_only_netlist(spice_slot, "xschem2spice output")
+	proj["spice"] = primary_slot
 	proj["complete"] = true
-	spice_paired.emit(out_user_path)
+	spice_paired.emit(str(primary_slot.get("user_path", "")))
 	_log("[color=darkgreen][b]OK:[/b][/color] Generated %s with xschem2spice." % str(spice_slot["display"]))
 	_check_project_subcircuit_files(proj, true)
 	_rebuild_cards()
 	return true
+
+func _ensure_xschem_symbol_cache() -> void:
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(XSCHEM_SYMBOL_CACHE_DIR))
+	for filename in BUILTIN_XSCHEM_SYMBOLS:
+		var source_path := "res://symbols/sym/%s" % filename
+		var cache_path := "%s/%s" % [XSCHEM_SYMBOL_CACHE_DIR, filename]
+		DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(cache_path.get_base_dir()))
+		var bytes := FileAccess.get_file_as_bytes(source_path)
+		if bytes.is_empty():
+			_log("[color=#b56a00][b]Warning:[/b][/color] Could not cache xschem symbol %s." % filename)
+			continue
+		var f := FileAccess.open(cache_path, FileAccess.WRITE)
+		if f == null:
+			_log("[color=#b56a00][b]Warning:[/b][/color] Could not write cached xschem symbol %s." % filename)
+			continue
+		f.store_buffer(bytes)
+		f.close()
+
+func _maybe_wrap_subckt_only_netlist(slot: Dictionary, source_label: String) -> Dictionary:
+	if bool(slot.get("autogenerated_wrapper", false)):
+		return slot
+	var ext := str(slot.get("ext", "")).to_lower()
+	if ext == "lib" or ext == "model" or ext == "mod":
+		return slot
+	var analysis := _analysis_for_entry(slot)
+	if not bool(analysis.get("is_single_subckt_only", false)):
+		return slot
+	var primary_v: Variant = analysis.get("primary_subckt", {})
+	if typeof(primary_v) != TYPE_DICTIONARY:
+		return slot
+	var primary := primary_v as Dictionary
+	var subckt_name := str(primary.get("name", ""))
+	if subckt_name == "":
+		return slot
+
+	var wrapper_text := _build_smoke_test_wrapper(slot, analysis)
+	if wrapper_text == "":
+		return slot
+
+	_ensure_upload_dir()
+	var base := str(slot.get("display", "netlist")).get_basename()
+	var wrapper_path := _avoid_collision("%s/%s_tb.spice" % [UPLOAD_DIR, base])
+	var wf := FileAccess.open(wrapper_path, FileAccess.WRITE)
+	if wf == null:
+		_log("[color=#b56a00][b]Warning:[/b][/color] Could not create wrapper for %s." % str(slot.get("display", "netlist")))
+		return slot
+	wf.store_string(wrapper_text)
+	wf.close()
+
+	var wrapper_bytes := 0
+	var rf := FileAccess.open(wrapper_path, FileAccess.READ)
+	if rf != null:
+		wrapper_bytes = rf.get_length()
+		rf.close()
+
+	var wrapper_slot: Dictionary = {
+		"display": wrapper_path.get_file(),
+		"user_path": wrapper_path,
+		"bytes": wrapper_bytes,
+		"ext": "spice",
+		"autogenerated_wrapper": true,
+		"wrapped_source_display": str(slot.get("display", "")),
+		"wrapped_source_path": str(slot.get("user_path", "")),
+		"spice_analysis": _analyze_spice_file(wrapper_path)
+	}
+	if bool(slot.get("autogenerated", false)):
+		wrapper_slot["autogenerated"] = true
+	_log("[color=darkgreen][b]OK:[/b][/color] Generated runnable app wrapper %s for %s %s." % [
+		str(wrapper_slot["display"]),
+		source_label,
+		str(slot.get("display", "netlist"))
+	])
+	return wrapper_slot
+
+func _build_smoke_test_wrapper(slot: Dictionary, analysis: Dictionary) -> String:
+	var source_path := str(slot.get("user_path", ""))
+	var fa := FileAccess.open(source_path, FileAccess.READ)
+	if fa == null:
+		return ""
+	var source_text := fa.get_as_text()
+	fa.close()
+
+	var primary := analysis.get("primary_subckt", {}) as Dictionary
+	var subckt_name := str(primary.get("name", ""))
+	var ports := primary.get("ports", []) as Array
+	var pininfo := primary.get("pininfo", {}) as Dictionary
+
+	var lines: Array[String] = []
+	lines.append("* Auto-generated runnable app wrapper for %s" % str(slot.get("display", "netlist")))
+	lines.append("* Source netlist body follows; terminal .end lines are omitted before the app top level.")
+	var sky130_includes := _sky130_model_includes_for_text(source_text)
+	if not sky130_includes.is_empty():
+		lines.append("* Auto-included Sky130 primitive model corners")
+		lines.append_array(sky130_includes)
+		lines.append("")
+	for raw_line in source_text.split("\n"):
+		var line := str(raw_line)
+		if line.strip_edges().to_lower() == ".end":
+			continue
+		lines.append(line)
+
+	lines.append("")
+	lines.append("* Auto-generated app top level")
+
+	var connections: Array[String] = []
+	var supply_nodes := _infer_supply_nodes(source_text, ports)
+
+	for port_v in ports:
+		var port := str(port_v).strip_edges()
+		if port == "":
+			continue
+		var direction := str(pininfo.get(port, "")).to_upper()
+		var node := _wrapper_node_for_port(port)
+		var port_class := _classify_wrapper_port(port, direction)
+		if port_class == "ground":
+			connections.append("0")
+			continue
+		connections.append(node)
+		if port_class == "power":
+			supply_nodes[node.to_lower()] = node
+
+	var supply_names := _lookup_values(supply_nodes)
+	supply_names.sort()
+	if not supply_names.is_empty():
+		lines.append(".global %s" % " ".join(_array_to_packed_strings(supply_names)))
+	for supply_v in supply_names:
+		var supply := str(supply_v)
+		lines.append("%s %s 0 1.8" % [_wrapper_element_name("V", supply), supply])
+
+	var dut_line := "XDUT"
+	for node in connections:
+		dut_line += " " + str(node)
+	dut_line += " " + subckt_name
+	lines.append(dut_line)
+
+	lines.append(".tran 10p 1e12")
+	lines.append(".save all")
+	lines.append(".end")
+	return "\n".join(lines) + "\n"
+
+func _infer_supply_nodes(source_text: String, ports: Array) -> Dictionary:
+	var supplies: Dictionary = {}
+	for port_v in ports:
+		var port := str(port_v).strip_edges()
+		if _classify_wrapper_port(port, "") == "power":
+			supplies[port.to_lower()] = _wrapper_node_for_port(port)
+	for raw_line in source_text.split("\n"):
+		var line := _strip_spice_comment(str(raw_line)).strip_edges()
+		if line == "" or line.begins_with("."):
+			continue
+		for token_v in line.split(" ", false):
+			var token := _clean_spice_node_token(str(token_v))
+			if _classify_wrapper_port(token, "") == "power":
+				supplies[token.to_lower()] = token
+	return supplies
+
+func _clean_spice_node_token(token: String) -> String:
+	var cleaned := token.strip_edges()
+	while cleaned.length() > 0 and (cleaned.ends_with(",") or cleaned.ends_with(")") or cleaned.ends_with("(")):
+		cleaned = cleaned.substr(0, cleaned.length() - 1)
+	return cleaned
+
+func _sky130_model_includes_for_text(source_text: String) -> Array[String]:
+	if not OS.has_feature("web"):
+		return []
+	var models: Dictionary = {}
+	for raw_line in source_text.split("\n"):
+		var line := _strip_spice_comment(str(raw_line)).strip_edges()
+		if line.find(SKY130_PRIMITIVE_PREFIX) < 0:
+			continue
+		for token_v in line.split(" ", false):
+			var token := str(token_v).strip_edges()
+			while token.ends_with(",") or token.ends_with(")") or token.ends_with("("):
+				token = token.substr(0, token.length() - 1)
+			var lower := token.to_lower()
+			if _is_bundled_sky130_mos_primitive(lower):
+				models[lower] = token
+	var includes: Array[String] = []
+	var names := _lookup_values(models)
+	names.sort()
+	for model_v in names:
+		var model := str(model_v)
+		includes.append(".include \"%s/models/libs.ref/sky130_fd_pr/spice/%s__tt.corner.spice\"" % [
+			WEB_PDK_CACHE_ROOT,
+			model
+		])
+	return includes
+
+func _classify_wrapper_port(port: String, direction: String) -> String:
+	var lower := port.to_lower()
+	if lower == "0" or lower == "gnd" or lower == "vss" or lower == "vgnd" or lower == "vnb" or lower == "sub" or lower == "substrate":
+		return "ground"
+	if lower == "vdd" or lower == "vcc" or lower == "vdda" or lower == "vddd" or lower == "vpwr" or lower == "vpb" or lower == "pwr" or lower == "power":
+		return "power"
+	if direction == "I":
+		return "input"
+	if direction == "O":
+		return "output"
+	if lower.find("clk") >= 0 or lower.find("clock") >= 0 or lower.begins_with("in"):
+		return "input"
+	if lower.begins_with("out") or lower == "y" or lower == "q":
+		return "output"
+	return "bidir"
+
+func _wrapper_node_for_port(port: String) -> String:
+	if port == "0":
+		return "0"
+	return port
+
+func _wrapper_element_name(prefix: String, port: String) -> String:
+	var out := prefix
+	for i in range(port.length()):
+		var c := port.substr(i, 1)
+		if (c >= "A" and c <= "Z") or (c >= "a" and c <= "z") or (c >= "0" and c <= "9") or c == "_":
+			out += c
+		else:
+			out += "_"
+	if out == prefix:
+		out += "NODE"
+	return out
 
 # -------------------------------------------------------------------
 # Web queue polling
@@ -2021,6 +2367,8 @@ func _patch_spice_for_subcircuit_support(user_path: String, proj: Dictionary) ->
 		var support_defs := _array_to_lookup(support_analysis.get("subckt_defs", []))
 		var needed := false
 		for call_key in calls.keys():
+			if _is_bundled_sky130_mos_primitive(call_key):
+				continue
 			if not root_defs.has(call_key) and support_defs.has(call_key):
 				needed = true
 				break

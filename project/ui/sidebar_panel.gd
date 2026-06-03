@@ -23,6 +23,7 @@ func _ready() -> void:
 	anchor_top = 0.0
 	anchor_right = 0.0
 	anchor_bottom = 1.0
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	_setup_panel()
 	_setup_toggle_button()
@@ -133,10 +134,12 @@ func _on_toggle() -> void:
 	if _panel_visible:
 		if _upload_panel != null:
 			_upload_panel.visible = true
+		offset_right = _panel_width + BUTTON_WIDTH + 4.0
 		_slide_tween.tween_property(self, "offset_left", 0.0, SLIDE_DURATION)
 		_toggle_button.text = "<"
 	else:
 		_slide_tween.tween_property(self, "offset_left", -_panel_width, SLIDE_DURATION)
+		_slide_tween.tween_callback(_shrink_collapsed_hit_rect)
 		_slide_tween.tween_callback(_hide_upload_panel_if_collapsed)
 		_toggle_button.text = ">"
 
@@ -147,7 +150,7 @@ func _sync_layout(force_position: bool = true) -> void:
 		return
 	_panel_width = target_width
 
-	offset_right = _panel_width + BUTTON_WIDTH + 4.0
+	offset_right = _panel_width + BUTTON_WIDTH + 4.0 if _panel_visible else BUTTON_WIDTH + 4.0
 	if _upload_panel != null:
 		_upload_panel.offset_left = 0.0
 		_upload_panel.offset_top = 0.0
@@ -206,3 +209,8 @@ func _position_toggle_button() -> void:
 func _hide_upload_panel_if_collapsed() -> void:
 	if not _panel_visible and _upload_panel != null:
 		_upload_panel.visible = false
+
+
+func _shrink_collapsed_hit_rect() -> void:
+	if not _panel_visible:
+		offset_right = BUTTON_WIDTH + 4.0

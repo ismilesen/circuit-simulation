@@ -21,6 +21,8 @@ var pin_positions: Dictionary = {}
 
 ## Thickness of line-segment bars.
 const BAR: float = 0.012
+const DEBUG_CLICK_AREAS: bool = false
+const CLICK_AREA_DEPTH: float = 0.1
 
 ## Arc rendering resolution (segments per full circle).
 const ARC_SEGMENTS: int = 16
@@ -96,13 +98,35 @@ func _add_click_area(scale: float, compact_mos_pin_grid: bool) -> void:
 	area.position = Vector3(center.x * scale, 0.04, center.y * scale)
 
 	var shape := BoxShape3D.new()
-	shape.size = Vector3(maxf(size.x + padding, 20.0) * scale, 0.12, maxf(size.y + padding, 20.0) * scale)
+	shape.size = Vector3(maxf(size.x + padding, 20.0) * scale, CLICK_AREA_DEPTH, maxf(size.y + padding, 20.0) * scale)
 
 	var collision := CollisionShape3D.new()
 	collision.shape = shape
 	area.add_child(collision)
 	area.input_event.connect(_on_click_area_input)
 	add_child(area)
+
+	if DEBUG_CLICK_AREAS:
+		_add_click_area_debug_mesh(area.position, shape.size)
+
+
+func _add_click_area_debug_mesh(pos: Vector3, size: Vector3) -> void:
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(size.x, size.y, size.z)
+
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.1, 0.85, 1.0, 0.28)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.no_depth_test = true
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+	var mi := MeshInstance3D.new()
+	mi.name = "ClickAreaDebug"
+	mi.mesh = mesh
+	mi.material_override = mat
+	mi.position = pos
+	add_child(mi)
 
 
 func _symbol_bounds(compact_mos_pin_grid: bool) -> Dictionary:
