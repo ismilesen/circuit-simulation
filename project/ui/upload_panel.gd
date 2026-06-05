@@ -1814,8 +1814,35 @@ func _on_card_gui_input(event: InputEvent, idx: int) -> void:
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
+			var previous_project := _selected_project
 			_selected_project = idx
 			_rebuild_cards.call_deferred()
+			if idx != previous_project:
+				_show_selected_project_schematic_if_idle(idx)
+
+
+func _show_selected_project_schematic_if_idle(idx: int) -> void:
+	if idx < 0 or idx >= projects.size():
+		return
+	if _is_simulation_running():
+		return
+
+	var xschem_v: Variant = projects[idx].get("xschem", null)
+	if typeof(xschem_v) != TYPE_DICTIONARY:
+		return
+	var xschem := xschem_v as Dictionary
+	var schematic_path := str(xschem.get("user_path", ""))
+	if schematic_path == "":
+		return
+
+	schematic_requested.emit(schematic_path)
+
+
+func _is_simulation_running() -> bool:
+	var sim := _resolve_simulator()
+	if sim != null and sim.has_method("is_running"):
+		return bool(sim.call("is_running"))
+	return false
 
 func _on_output_box_gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
