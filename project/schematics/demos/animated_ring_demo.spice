@@ -1,0 +1,35 @@
+* Animated five-stage ring oscillator demo for the 3D circuit visualizer.
+* Pair with animated_ring_demo.sch, then run transient simulation.
+
+.title animated_ring_demo
+.options method=gear maxord=2
+
+VDD vdd 0 1.8
+
+* Smooth behavioral inverters feeding large RC loads. The delay is intentionally
+* slow so live demos show a readable glow chasing through the five stage taps.
+B0 d0 0 V = {1.8/(1+exp((V(n4)-0.9)/0.045))}
+R0 d0 n0 5.4Meg
+C0 n0 0 120p IC=0.05
+
+B1 d1 0 V = {1.8/(1+exp((V(n0)-0.9)/0.045))}
+R1 d1 n1 5.4Meg
+C1 n1 0 120p IC=0.35
+
+B2 d2 0 V = {1.8/(1+exp((V(n1)-0.9)/0.045))}
+R2 d2 n2 5.4Meg
+C2 n2 0 120p IC=0.75
+
+B3 d3 0 V = {1.8/(1+exp((V(n2)-0.9)/0.045))}
+R3 d3 n3 5.4Meg
+C3 n3 0 120p IC=1.25
+
+B4 d4 0 V = {1.8/(1+exp((V(n3)-0.9)/0.045))}
+R4 d4 n4 5.4Meg
+C4 n4 0 120p IC=1.65
+
+.tran 100n 32m uic
+.save v(vdd) v(n0) v(n1) v(n2) v(n3) v(n4)
+.measure tran n0_min MIN v(n0)
+.measure tran n0_max MAX v(n0)
+.end

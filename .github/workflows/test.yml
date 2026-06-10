@@ -237,13 +237,29 @@ jobs:
               exit 1
             fi
           }
+          require_pck_entry() {
+            local entry="$1"
+            if ! grep -aFq "$entry" "$EXPORT_DIR/index.pck"; then
+              echo "ERROR: expected bundled export entry is missing from index.pck: $entry"
+              echo "Bundled schematic/demo entries found:"
+              strings "$EXPORT_DIR/index.pck" | grep -E 'schematics/demos|\.sch|\.spice' | sort | sed -n '1,120p'
+              exit 1
+            fi
+          }
           require_file "$EXPORT_DIR/index.html"
+          require_file "$EXPORT_DIR/index.pck"
           require_file "$EXPORT_DIR/upload_bridge.js"
           require_file "$EXPORT_DIR/server.js"
           require_file "$EXPORT_DIR/libngspice.so"
           require_file "$EXPORT_DIR/ngspice/libngspice.so"
           require_pattern 'libngspice\.so' "$EXPORT_DIR/index.html" "libngspice preload"
           require_pattern 'const GODOT_THREADS_ENABLED = true;' "$EXPORT_DIR/index.html" "threaded Godot export flag"
+          require_pck_entry 'schematics/demos/animated_ring_demo.sch'
+          require_pck_entry 'schematics/demos/animated_ring_demo.spice'
+          require_pck_entry 'schematics/demos/sky130_button_inverter.sch'
+          require_pck_entry 'schematics/demos/sky130_button_inverter.spice'
+          require_pck_entry 'schematics/demos/sky130_nand2.sch'
+          require_pck_entry 'schematics/demos/sky130_nand2.spice'
           if grep -Eq '^progressive_web_app/enabled=true$' project/export_presets.cfg; then
             require_file "$EXPORT_DIR/index.service.worker.js"
             require_pattern '"serviceWorker":"index\.service\.worker\.js"' "$EXPORT_DIR/index.html" "service worker config"

@@ -8,6 +8,23 @@ signal pdk_component_selected(component: Dictionary)
 @export var simulator_path: NodePath = NodePath("..")
 const SIM_SCRIPT_PATH := "res://simulator/circuit_simulator.gd"
 const UPLOAD_DIR := "user://uploads"
+const BUNDLED_EXAMPLES := [
+	{
+		"label": "Animated Ring",
+		"schematic": "res://schematics/demos/animated_ring_demo.sch",
+		"spice": "res://schematics/demos/animated_ring_demo.spice",
+	},
+	{
+		"label": "Sky130 Button Inverter",
+		"schematic": "res://schematics/demos/sky130_button_inverter.sch",
+		"spice": "res://schematics/demos/sky130_button_inverter.spice",
+	},
+	{
+		"label": "Sky130 NAND2",
+		"schematic": "res://schematics/demos/sky130_nand2.sch",
+		"spice": "res://schematics/demos/sky130_nand2.spice",
+	},
+]
 
 const WORKSPACE_EXT := ".cvw.zip"
 const WORKSPACE_MANIFEST := "manifest.json"
@@ -111,6 +128,8 @@ var _pdk_list: ItemList = null
 var _pdk_status: Label = null
 var _pdk_models_ready: bool = false
 var _pdk_model_request: HTTPRequest = null
+var _examples_dropdown: OptionButton = null
+var _load_example_button: Button = null
 
 var _external_re: RegEx = null
 var _include_re: RegEx = null
@@ -124,6 +143,7 @@ func _ready() -> void:
 	_ensure_upload_dir()
 	_ensure_ws_name_popup()
 	_setup_pdk_browser()
+	_setup_examples_picker()
 
 	file_dialog.access = FileDialog.ACCESS_FILESYSTEM
 	file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILES
@@ -334,6 +354,63 @@ func _on_upload_pressed() -> void:
 		file_dialog.popup_centered_ratio(0.8)
 		_refresh_status("native: file dialog opened", StatusTone.WARN)
 
+
+func _setup_examples_picker() -> void:
+	var controls_col := get_node_or_null("Margin/VBox/ControlsCol")
+	if controls_col == null:
+		return
+
+	var row := HBoxContainer.new()
+	row.name = "ExamplesRow"
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_theme_constant_override("separation", 6)
+
+	_examples_dropdown = OptionButton.new()
+	_examples_dropdown.name = "ExamplesDropdown"
+	_examples_dropdown.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for example in BUNDLED_EXAMPLES:
+		_examples_dropdown.add_item(str(example.get("label", "Example")))
+	row.add_child(_examples_dropdown)
+
+	_load_example_button = Button.new()
+	_load_example_button.name = "LoadExampleButton"
+	_load_example_button.text = "Load Example"
+	_load_example_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_load_example_button.pressed.connect(_on_load_example_pressed)
+	row.add_child(_load_example_button)
+
+	controls_col.add_child(row)
+	controls_col.move_child(row, 2)
+
+
+func _on_load_example_pressed() -> void:
+	if _examples_dropdown == null:
+		return
+	var idx := _examples_dropdown.selected
+	if idx < 0 or idx >= BUNDLED_EXAMPLES.size():
+		return
+
+	var example: Dictionary = BUNDLED_EXAMPLES[idx]
+	var label := str(example.get("label", "Example"))
+	var schematic_path := str(example.get("schematic", ""))
+	var spice_path := str(example.get("spice", ""))
+	if schematic_path == "" or spice_path == "":
+		_set_error("Bundled example is missing a schematic or SPICE path.")
+		return
+
+	_pending_slot_project = -1
+	_pending_slot_key = ""
+	var loaded_schematic := _stage_resource_file(schematic_path)
+	var loaded_spice := _stage_resource_file(spice_path)
+	if not loaded_schematic or not loaded_spice:
+		_set_error("Failed to load bundled example: %s" % label)
+		return
+
+	_recheck_all_project_dependencies(true)
+	_rebuild_cards()
+	_refresh_status("example loaded: %s" % label, StatusTone.OK)
+	_log("[color=darkgreen][b]OK:[/b][/color] Loaded bundled example: %s." % label)
+
 func _on_native_file_selected(path: String) -> void:
 	if path.strip_edges() == "":
 		return
@@ -423,6 +500,19 @@ func _stage_native_file(src_path: String) -> bool:
 	var bytes := src.get_buffer(src.get_length())
 	src.close()
 	return _stage_bytes(src_path.get_file(), bytes)
+
+
+func _stage_resource_file(resource_path: String) -> bool:
+	if not FileAccess.file_exists(resource_path):
+		push_warning("UploadPanel: bundled example file not found: " + resource_path)
+		return false
+	var src := FileAccess.open(resource_path, FileAccess.READ)
+	if src == null:
+		push_warning("UploadPanel: failed to open bundled example file: " + resource_path)
+		return false
+	var bytes := src.get_buffer(src.get_length())
+	src.close()
+	return _stage_bytes(resource_path.get_file(), bytes)
 
 func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
 	_ensure_upload_dir()
