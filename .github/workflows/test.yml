@@ -264,6 +264,8 @@ jobs:
             require_file "$EXPORT_DIR/index.service.worker.js"
             require_pattern '"serviceWorker":"index\.service\.worker\.js"' "$EXPORT_DIR/index.html" "service worker config"
             require_pattern "Content-Encoding" "$EXPORT_DIR/index.service.worker.js" "service worker content-encoding cleanup"
+            require_pattern 'libngspice\.so' "$EXPORT_DIR/index.service.worker.js" "libngspice service worker cache entry"
+            require_pattern 'libcircuit_sim\.web\.template_release\.wasm32\.wasm' "$EXPORT_DIR/index.service.worker.js" "release GDExtension service worker cache entry"
           fi
           if find project/build/web/release -maxdepth 1 -type f -name 'libcircuit_sim.web.*.nothreads.wasm' | grep -q .; then
             echo "ERROR: web export contains stale .nothreads wasm artifacts"
@@ -293,6 +295,18 @@ jobs:
           }
           if (!libs.includes("libngspice.so")) {
             throw new Error("libngspice.so is missing from gdextensionLibs");
+          }
+          if (fs.existsSync("project/build/web/release/index.service.worker.js")) {
+            const worker = fs.readFileSync("project/build/web/release/index.service.worker.js", "utf8");
+            const cacheableMatch = worker.match(/const CACHEABLE_FILES = (\[[^\n]*?\]);/);
+            if (!cacheableMatch) throw new Error("Could not parse service worker CACHEABLE_FILES");
+            const cacheableFiles = JSON.parse(cacheableMatch[1]);
+            for (const lib of libs) {
+              const basename = lib.split("/").pop();
+              if (!cacheableFiles.includes(basename)) {
+                throw new Error(`${basename} is missing from service worker CACHEABLE_FILES`);
+              }
+            }
           }
           NODE
 

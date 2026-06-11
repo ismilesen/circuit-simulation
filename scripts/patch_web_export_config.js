@@ -80,8 +80,9 @@ fs.writeFileSync(resolvedPath, html);
 const exportDir = path.dirname(resolvedPath);
 const serviceWorkerPath = path.join(exportDir, "index.service.worker.js");
 if (fs.existsSync(serviceWorkerPath)) {
+  const sideModuleBasenames = sideModulePaths.map((entry) => path.basename(entry));
   const hash = crypto.createHash("sha256");
-  for (const file of ["index.html", "index.pck", ...sideModulePaths.map((entry) => path.basename(entry))]) {
+  for (const file of ["index.html", "index.pck", ...sideModuleBasenames]) {
     const filePath = path.join(exportDir, file);
     if (fs.existsSync(filePath)) {
       hash.update(file);
@@ -99,6 +100,28 @@ if (fs.existsSync(serviceWorkerPath)) {
     "const crossOriginIsolatedHeaders = new Headers(response.headers);\n",
     "const crossOriginIsolatedHeaders = new Headers(response.headers);\n\tcrossOriginIsolatedHeaders.delete('Content-Encoding');\n\tcrossOriginIsolatedHeaders.delete('Content-Length');\n"
   );
+
+  worker = worker.replace(
+    /const CACHEABLE_FILES = (\[[^\n]*?\]);/,
+    (statement, json) => {
+      let cacheableFiles;
+      try {
+        cacheableFiles = JSON.parse(json);
+      } catch (err) {
+        console.error("ERROR: Failed to parse service worker CACHEABLE_FILES:", err.message);
+        process.exit(1);
+      }
+
+      for (const sideModule of sideModuleBasenames) {
+        if (!cacheableFiles.includes(sideModule)) {
+          cacheableFiles.push(sideModule);
+        }
+      }
+
+      return `const CACHEABLE_FILES = ${JSON.stringify(cacheableFiles)};`;
+    }
+  );
+
   fs.writeFileSync(serviceWorkerPath, worker);
   console.log("Updated service worker CACHE_VERSION:", cacheVersion);
 }
