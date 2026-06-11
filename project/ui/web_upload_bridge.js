@@ -1,15 +1,8 @@
 // res://ui/web_upload_bridge.js
-//
-// Lightweight/legacy upload bridge kept beside the UI scene for manual web
-// harnesses. The exported app should prefer project/web/upload_bridge.js, which
-// batches picker and drag/drop payloads; both bridges fill godotUploadQueue with
-// base64 file entries consumed by upload_panel.gd.
 (() => {
   if (!window.godotUploadQueue) window.godotUploadQueue = [];
 
   window.godotUploadOpenPicker = function () {
-	// Browser File objects cannot be passed directly into Godot, so the bridge
-	// serializes each selected file to base64 and lets GDScript stage the bytes.
 	const input = document.createElement("input");
 	input.type = "file";
 	input.multiple = true;

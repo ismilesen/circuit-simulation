@@ -122,9 +122,6 @@ public:
     bool reset_simulation();
     bool is_running() const;
 
-    // UploadPanel calls this after staging a .sch file. The native bridge owns
-    // symbol resolution and netlist emission, then returns a Dictionary status
-    // that is easy for GDScript to surface in the side-panel console.
     Dictionary xschem_to_spice(
         const String &schematic_path,
         const String &output_path,

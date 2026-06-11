@@ -35,10 +35,6 @@ extern "C" {
 #include "xschemrc.h"
 }
 
-// xschem2spice is linked as a small C library inside the GDExtension. The UI
-// passes staged filesystem paths in, and this file returns a Godot Dictionary
-// result instead of exposing C structs or FILE* handles to GDScript.
-
 using namespace godot;
 
 // ─── File / string utilities ────────────────────────────────────────────────
@@ -820,8 +816,6 @@ void CircuitSimulator::_bind_methods() {
     ClassDB::bind_method(D_METHOD("stop_continuous"), &CircuitSimulator::stop_continuous);
     ClassDB::bind_method(D_METHOD("reset_simulation"), &CircuitSimulator::reset_simulation);
     ClassDB::bind_method(D_METHOD("is_running"), &CircuitSimulator::is_running);
-    // UploadPanel calls this after staging an xschem .sch file; it returns a
-    // small Dictionary so GDScript can report errors without knowing C details.
     ClassDB::bind_method(
         D_METHOD("xschem_to_spice", "schematic_path", "output_path", "xschemrc_path", "symbol_dirs"),
         &CircuitSimulator::xschem_to_spice,
@@ -1040,8 +1034,6 @@ void CircuitSimulator::shutdown_ngspice() {
 
 // ─── Main entry point ────────────────────────────────────────────────────────
 // Converts an xschem schematic to a SPICE deck via the xschem2spice submodule.
-// This is the native half of UploadPanel._auto_generate_spice(): the UI has
-// already copied uploads into user:// storage and assembled symbol search dirs.
 Dictionary CircuitSimulator::xschem_to_spice(
     const String &schematic_path,
     const String &output_path,
@@ -1051,16 +1043,11 @@ Dictionary CircuitSimulator::xschem_to_spice(
     Dictionary result;
     result["ok"] = false;
 
-    // Result contract for GDScript:
-    //   ok=false,error=... on failure
-    //   ok=true,output_path=... on success
     CharString schematic_utf8 = schematic_path.utf8();
     CharString output_utf8 = output_path.utf8();
     CharString xschemrc_utf8 = xschemrc_path.utf8();
 
 #ifndef __EMSCRIPTEN__
-    // Desktop paths arrive from ProjectSettings.globalize_path(), but normalize
-    // again here before creating the output directory or opening host files.
     const fs::path schematic_fs_path = fs::absolute(fs::path(schematic_utf8.get_data())).lexically_normal();
     const fs::path output_fs_path = fs::absolute(fs::path(output_utf8.get_data())).lexically_normal();
     const fs::path output_dir = output_fs_path.parent_path();
@@ -1081,8 +1068,6 @@ Dictionary CircuitSimulator::xschem_to_spice(
 
     FILE *out = std::fopen(output_fs_path.string().c_str(), "w");
 #else
-    // Web paths are Emscripten/Godot virtual filesystem paths. Keep them as
-    // strings because std::filesystem can disagree with the mounted namespace.
     const std::string schematic_fs_path(schematic_utf8.get_data());
     const std::string output_fs_path(output_utf8.get_data());
 
@@ -1107,21 +1092,16 @@ Dictionary CircuitSimulator::xschem_to_spice(
     xs_library_path library_path;
     xs_library_path_init(&library_path);
 
-    // Optional xschemrc support lets callers seed the same library paths xschem
-    // would use, but uploads usually pass explicit symbol_dirs instead.
     if (xschemrc_path.length() > 0) {
         xs_library_path_load_xschemrc(&library_path, xschemrc_utf8.get_data());
     }
 
 #ifndef __EMSCRIPTEN__
-    // Always search beside the schematic first so uploaded sibling .sym files
-    // can override or supplement bundled libraries.
     const fs::path schematic_dir = schematic_fs_path.parent_path();
     if (!schematic_dir.empty()) {
         xs_library_path_add(&library_path, schematic_dir.string().c_str());
     }
 #else
-    // Same rule as desktop, implemented with a string dirname for web paths.
     const std::string schematic_dir = web_dirname(schematic_fs_path);
     if (!schematic_dir.empty()) {
         xs_library_path_add(&library_path, schematic_dir.c_str());
@@ -1130,7 +1110,6 @@ Dictionary CircuitSimulator::xschem_to_spice(
 
     std::vector<CharString> symbol_dir_utf8;
     symbol_dir_utf8.reserve(symbol_dirs.size());
-    // Keep CharString storage alive for the lifetime of xs_library_path entries.
     for (int64_t i = 0; i < symbol_dirs.size(); i++) {
         String dir = symbol_dirs[i];
         if (dir.strip_edges().is_empty()) {
@@ -1147,8 +1126,6 @@ Dictionary CircuitSimulator::xschem_to_spice(
     int status = xs_parse_schematic(schematic_fs_path.c_str(), &schematic);
 #endif
     if (status == 0) {
-        // xschem2spice pipeline: parse .sch, resolve each symbol against the
-        // library path, then emit the flattened SPICE netlist.
         xs_netlister netlister;
         xs_netlister_init(&netlister, &library_path, 1);
         status = xs_netlister_resolve_symbols(&netlister, &schematic);
@@ -1168,8 +1145,6 @@ Dictionary CircuitSimulator::xschem_to_spice(
 #else
         std::remove(output_fs_path.c_str());
 #endif
-        // Remove partial netlists so the upload UI never treats a failed
-        // conversion as a runnable project on a later pass.
         result["error"] = String("xschem2spice failed to generate a SPICE netlist");
         return result;
     }

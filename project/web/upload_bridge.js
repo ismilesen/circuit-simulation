@@ -24,9 +24,6 @@
 (function () {
   "use strict";
 
-  // Keep this bridge intentionally dumb: browser APIs collect bytes, while the
-  // Godot side owns validation, staging, workspace loading, and project state.
-
   // Queue polled every frame by upload_panel.gd via JavaScriptBridge.eval().
   window.godotUploadQueue = [];
 
