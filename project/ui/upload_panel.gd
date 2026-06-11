@@ -1,11 +1,21 @@
 extends Control
 
+## Side-panel workbench for uploads, staged files, workspace archives, console
+## output, status text, and simulation controls.
+## All file entry points normalize through _stage_bytes(), which keeps native
+## dialogs, drag-and-drop, browser uploads, bundled examples, and workspace
+## restores on the same project model.
+
 signal schematic_requested(path: String)
 signal spice_paired(path: String)
 signal dark_mode_changed(dark_mode: bool)
 signal pdk_component_selected(component: Dictionary)
 
 @export var simulator_path: NodePath = NodePath("..")
+
+# Staged uploads are copied into Godot user:// storage before the rest of the
+# app sees them. That gives native, web, and restored workspace files one stable
+# path format for visualization and ngspice.
 const SIM_SCRIPT_PATH := "res://simulator/circuit_simulator.gd"
 const UPLOAD_DIR := "user://uploads"
 const BUNDLED_EXAMPLES := [
@@ -26,9 +36,15 @@ const BUNDLED_EXAMPLES := [
 	},
 ]
 
+# Workspace archives are simple zips: a JSON manifest plus file bytes under
+# files/. The manifest stores project slot metadata, not absolute host paths.
 const WORKSPACE_EXT := ".cvw.zip"
 const WORKSPACE_MANIFEST := "manifest.json"
 const WORKSPACE_FILES_DIR := "files/"
+
+# xschem2spice symbol lookup needs predictable directories. The built-in
+# symbols are mirrored into user:// so the native C bridge and web filesystem
+# both see the same library roots.
 const WEB_PDK_CACHE_ROOT := "user://pdks/sky130"
 const XSCHEM_SYMBOL_CACHE_DIR := "user://xschem_symbols"
 const SKY130_PRIMITIVE_PREFIX := "sky130_fd_pr__"
@@ -57,6 +73,8 @@ var SYMBOL_EXTS: PackedStringArray = PackedStringArray(["sym"])
 var XSCHEM_EXTS: PackedStringArray = PackedStringArray(["sch", "sym"])
 var SYMBOL_DIRS: PackedStringArray = PackedStringArray(["user://xschem_symbols", "res://symbols", "res://symbols/sym", "user://pdk_symbols"])
 
+# Primary command row: upload opens a picker, run/stop hand off to
+# CircuitSimulator, and save/load persist the staged workspace.
 @onready var upload_button: Button = $Margin/VBox/ControlsCol/PrimaryRow/UploadButton
 @onready var run_button: Button = $Margin/VBox/ControlsCol/PrimaryRow/RunButton
 @onready var stop_reset_button: Button = $Margin/VBox/ControlsCol/PrimaryRow/StopResetButton
@@ -65,16 +83,22 @@ var SYMBOL_DIRS: PackedStringArray = PackedStringArray(["user://xschem_symbols",
 @onready var clear_button: Button = $Margin/VBox/ControlsCol/UtilityRow/ClearButton
 @onready var theme_toggle_button: Button = $Margin/VBox/ControlsCol/UtilityRow/ThemeToggleButton
 
+# File workspace: one card per project, with xschem/SPICE slots and any switch
+# controls discovered from the schematic.
 @onready var project_cards: VBoxContainer = $Margin/VBox/CardContainer/CardScroll/ProjectCards
 
+# Status bar is intentionally short; the rich text console below keeps the
+# longer chronological trace.
 @onready var status_bar: PanelContainer = $Margin/VBox/StatusBar
 @onready var status_prefix: Label = $Margin/VBox/StatusBar/StatusRow/StatusPrefix
 @onready var status_value: Label = $Margin/VBox/StatusBar/StatusRow/StatusValue
 
+# Console and picker dialogs used by the upload, workspace, and run flows.
 @onready var output_box: RichTextLabel = $Margin/VBox/Output
 @onready var file_dialog: FileDialog = $FileDialog
 @onready var workspace_dialog: FileDialog = $WorkspaceDialog
 
+# Drop-zone labels double as upload feedback during drag/drop staging.
 @onready var drop_zone: PanelContainer = $Margin/VBox/DropZone
 @onready var drop_title: Label = $Margin/VBox/DropZone/DropZoneMargin/DropZoneVBox/DropTitle
 @onready var drop_hint: Label = $Margin/VBox/DropZone/DropZoneMargin/DropZoneVBox/DropHint
@@ -88,8 +112,14 @@ var SYMBOL_DIRS: PackedStringArray = PackedStringArray(["user://xschem_symbols",
 #   "complete" : bool
 # -------------------------------------------------------------------
 var projects: Array[Dictionary] = []
+
+# Support files are uploaded model/include decks that should be available to
+# dependency checks and temporary .include patching, but are not separate runs.
 var support_files: Array[Dictionary] = []
 
+# Pending slot state is set when a card's plus button is used, so the next
+# picked file fills that exact xschem or SPICE slot instead of creating a new
+# project.
 var _pending_slot_project: int = -1
 var _pending_slot_key: String = ""
 var _selected_project: int = -1
@@ -97,10 +127,11 @@ var _dark_mode: bool = false
 var _last_status_msg: String = "idle"
 var _last_status_tone: StatusTone = StatusTone.IDLE
 
-## Reference to the CircuitSimulator node (resolved lazily).
+## Reference to the CircuitSimulator node, resolved lazily so scenes can either
+## provide a native GDExtension node or fall back to a script node.
 var _sim: Node = null
 
-# Theme / style vars
+# Theme / style vars reused by dynamically rebuilt project cards.
 var _t: Theme = null
 var _sb_panel: StyleBoxFlat = null
 var _sb_panel_hover: StyleBoxFlat = null
@@ -115,6 +146,7 @@ var _sb_slot_box_hover: StyleBoxFlat = null
 
 enum StatusTone { IDLE, OK, WARN, ERROR }
 
+# Workspace dialog state and optional PDK browser/cache state.
 var _ws_mode: String = ""
 var _ws_name_dialog: AcceptDialog = null
 var _ws_name_edit: LineEdit = null
@@ -131,6 +163,7 @@ var _pdk_model_request: HTTPRequest = null
 var _examples_dropdown: OptionButton = null
 var _load_example_button: Button = null
 
+# Reused parsers for SPICE dependency checks and switch-source patching.
 var _external_re: RegEx = null
 var _include_re: RegEx = null
 
@@ -139,12 +172,16 @@ var _include_re: RegEx = null
 # -------------------------------------------------------------------
 
 func _ready() -> void:
+	# Build the side-panel chrome before connecting file and simulation events,
+	# because the status bar and console are used by most setup failures.
 	_apply_theme()
 	_ensure_upload_dir()
 	_ensure_ws_name_popup()
 	_setup_pdk_browser()
 	_setup_examples_picker()
 
+	# Native builds use Godot dialogs directly; web builds use the JavaScript
+	# bridge and are polled from _process().
 	file_dialog.access = FileDialog.ACCESS_FILESYSTEM
 	file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILES
 	file_dialog.use_native_dialog = true
@@ -179,6 +216,8 @@ func _ready() -> void:
 			if not get_viewport().files_dropped.is_connected(Callable(self, "_on_os_files_dropped")):
 				get_viewport().files_dropped.connect(Callable(self, "_on_os_files_dropped"))
 
+	# These regular expressions are kept hot because upload staging and run-time
+	# patching both need quick SPICE scans.
 	_external_re = RegEx.new()
 	_external_re.compile("(?i)\\bexternal\\b")
 	_include_re = RegEx.new()
@@ -188,6 +227,8 @@ func _ready() -> void:
 	_refresh_status("idle", StatusTone.IDLE)
 
 	if OS.has_feature("web"):
+		# The bridge is injected by exported HTML, so report its presence in the
+		# console instead of failing during scene startup.
 		var has_bridge: bool = _web_eval_bool(
 			"typeof window.godotUploadOpenPicker === 'function' && Array.isArray(window.godotUploadQueue)"
 		)
@@ -338,9 +379,13 @@ func _on_pdk_item_selected(index: int) -> void:
 
 # -------------------------------------------------------------------
 # Upload flows
+# Native dialogs, OS drops, web queue payloads, bundled examples, and workspace
+# restore all feed _stage_bytes() after they have file bytes and a display name.
 # -------------------------------------------------------------------
 
 func _on_upload_pressed() -> void:
+	# A top-level upload should create or update projects normally, so clear any
+	# pending slot-fill request left by a card plus button.
 	_pending_slot_project = -1
 	_pending_slot_key = ""
 	if OS.has_feature("web"):
@@ -356,6 +401,8 @@ func _on_upload_pressed() -> void:
 
 
 func _setup_examples_picker() -> void:
+	# Examples use the same staging path as user uploads; they are just read from
+	# res:// instead of a host picker or browser queue.
 	var controls_col := get_node_or_null("Margin/VBox/ControlsCol")
 	if controls_col == null:
 		return
@@ -421,6 +468,8 @@ func _on_native_file_selected(path: String) -> void:
 func _on_native_files_selected(paths: PackedStringArray) -> void:
 	if paths.is_empty():
 		return
+	# Sort the multi-select before staging so a schematic can become the project
+	# anchor and support symbols/netlists are handled in predictable groups.
 	var schematic_paths: Array[String] = []
 	var symbol_paths: Array[String] = []
 	var spice_paths: Array[String] = []
@@ -490,6 +539,8 @@ func _on_os_files_dropped(files: PackedStringArray) -> void:
 		_refresh_status("drop received, no valid files", StatusTone.WARN)
 
 func _stage_native_file(src_path: String) -> bool:
+	# Native files may live anywhere on the host, so copy their bytes into
+	# user://uploads before the rest of the app references them.
 	if not FileAccess.file_exists(src_path):
 		_set_error("File does not exist: %s" % src_path)
 		return false
@@ -515,6 +566,8 @@ func _stage_resource_file(resource_path: String) -> bool:
 	return _stage_bytes(resource_path.get_file(), bytes)
 
 func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
+	# This is the only place that turns incoming bytes into a staged file slot.
+	# Keeping that normalization here makes web/native/workspace behavior match.
 	_ensure_upload_dir()
 	var safe_name := _sanitize_filename(original_name)
 	var user_path := "%s/%s" % [UPLOAD_DIR, safe_name]
@@ -540,10 +593,14 @@ func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
 	elif SCHEMATIC_EXTS.has(ext):
 		_assign_xschem(slot)
 	elif SYMBOL_EXTS.has(ext):
+		# Symbol uploads are lookup material for xschem2spice, not runnable
+		# projects on their own.
 		_log("[color=#336699][b]Info:[/b][/color] Added symbol file for xschem2spice lookup.")
 	elif NETLIST_EXTS.has(ext):
 		var analysis := _analyze_spice_file(user_path)
 		slot["spice_analysis"] = analysis
+		# Model/include decks can be both support files and project candidates;
+		# assignment below preserves the existing behavior for both cases.
 		if _should_stage_as_support_file(slot, analysis):
 			_assign_support_file(slot)
 		_assign_spice(slot)
@@ -563,9 +620,13 @@ func _stage_bytes(original_name: String, bytes: PackedByteArray) -> bool:
 
 # -------------------------------------------------------------------
 # Project slot assignment
+# Projects are the side panel's file workspace: each card pairs a schematic
+# slot with a runnable SPICE slot, plus optional discovered switch state.
 # -------------------------------------------------------------------
 
 func _assign_spice(slot: Dictionary) -> void:
+	# A same-basename SPICE upload replaces the matching project's runnable
+	# netlist; otherwise it starts a standalone runnable project.
 	var original_basename := (slot["display"] as String).get_basename()
 	var primary_slot := _maybe_wrap_subckt_only_netlist(slot, "uploaded netlist")
 	for i in projects.size():
@@ -591,6 +652,8 @@ func _assign_spice(slot: Dictionary) -> void:
 	spice_paired.emit(str(primary_slot.get("user_path", "")))
 
 func _assign_support_file(slot: Dictionary) -> void:
+	# Support files satisfy .include/.lib or subcircuit dependencies without
+	# becoming the selected run target.
 	var path := str(slot.get("user_path", ""))
 	for i in support_files.size():
 		if str((support_files[i] as Dictionary).get("display", "")) == str(slot.get("display", "")):
@@ -601,6 +664,8 @@ func _assign_support_file(slot: Dictionary) -> void:
 	_log("[color=#336699][b]Info:[/b][/color] Added support SPICE/model file %s." % path)
 
 func _should_stage_as_support_file(slot: Dictionary, analysis: Dictionary) -> bool:
+	# Treat obvious model libraries, dependency fixes, and pure subcircuit
+	# definition decks as support material for existing projects.
 	if _pending_slot_project >= 0:
 		return false
 	if _netlist_satisfies_missing_dependency(slot, analysis):
@@ -640,6 +705,9 @@ func _netlist_satisfies_missing_dependency(slot: Dictionary, analysis: Dictionar
 	return false
 
 func _analyze_spice_file(user_path: String) -> Dictionary:
+	# Lightweight SPICE scan for the UI: it is not a simulator parser, only the
+	# metadata needed for dependency prompts, support-file matching, and wrapper
+	# generation.
 	var report: Dictionary = {
 		"subckt_defs": [],
 		"subckt_calls": [],
@@ -803,6 +871,8 @@ func _extract_subckt_call_name(line: String) -> String:
 	return ""
 
 func _check_project_subcircuit_files(proj: Dictionary, prompt: bool = true) -> Dictionary:
+	# Combine the project's root netlist and staged support files, then report
+	# missing include paths or subcircuit definitions before a run starts.
 	var report: Dictionary = {
 		"ok": true,
 		"missing_subckts": [],
@@ -963,6 +1033,8 @@ func _unquote(value: String) -> String:
 	return value
 
 func _assign_xschem(slot: Dictionary) -> void:
+	# Schematic uploads anchor a project and immediately expose button symbols as
+	# UI switches, even before xschem2spice has produced a runnable netlist.
 	var buttons := _parse_buttons_from_sch(str(slot.get("user_path", "")))
 	var sw: Dictionary = {}
 	for b in buttons:
@@ -987,6 +1059,8 @@ func _assign_xschem(slot: Dictionary) -> void:
 	schematic_requested.emit(str(slot.get("user_path", "")))
 
 func _assign_to_pending_slot(slot: Dictionary) -> void:
+	# Card plus buttons route the next selected file here, enforcing the expected
+	# file type for that xschem/SPICE slot.
 	var idx := _pending_slot_project
 	var key := _pending_slot_key
 	_pending_slot_project = -1
@@ -1032,14 +1106,20 @@ func _assign_to_pending_slot(slot: Dictionary) -> void:
 
 # -------------------------------------------------------------------
 # Automatic xschem -> SPICE conversion
+# The upload panel does not parse xschem itself. It prepares filesystem paths
+# and symbol search roots, then calls the CircuitSimulator GDExtension bridge.
 # -------------------------------------------------------------------
 
 func _resolve_autogen_projects() -> void:
+	# Any project with a schematic but no SPICE netlist is a candidate for
+	# automatic generation after uploads, drops, or symbol additions.
 	for proj in projects:
 		if proj.get("xschem") != null and proj.get("spice") == null:
 			_auto_generate_spice(proj)
 
 func _auto_generate_spice(proj: Dictionary) -> bool:
+	# Convert a staged .sch into a staged .spice beside the uploaded files, then
+	# treat the generated deck exactly like an uploaded runnable netlist.
 	var xschem_slot_v: Variant = proj.get("xschem")
 	if typeof(xschem_slot_v) != TYPE_DICTIONARY:
 		return false
@@ -1069,6 +1149,8 @@ func _auto_generate_spice(proj: Dictionary) -> bool:
 		symbol_dirs.append(ProjectSettings.globalize_path(d))
 	symbol_dirs.append(ProjectSettings.globalize_path(UPLOAD_DIR))
 
+	# xschem_to_spice is implemented in C++ so the same headless netlister can
+	# run on desktop and web builds.
 	var res_v: Variant = sim.call("xschem_to_spice", sch_os_path, out_os_path, "", symbol_dirs)
 	if typeof(res_v) != TYPE_DICTIONARY:
 		_set_error("xschem2spice returned an unexpected result.")
@@ -1103,6 +1185,9 @@ func _auto_generate_spice(proj: Dictionary) -> bool:
 	return true
 
 func _ensure_xschem_symbol_cache() -> void:
+	# Mirror the built-in symbols into user://. That puts uploaded schematics,
+	# uploaded symbols, and built-in fallback symbols in the same filesystem
+	# namespace for the native netlister.
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(XSCHEM_SYMBOL_CACHE_DIR))
 	for filename in BUILTIN_XSCHEM_SYMBOLS:
 		var source_path := "res://symbols/sym/%s" % filename
@@ -1120,6 +1205,8 @@ func _ensure_xschem_symbol_cache() -> void:
 		f.close()
 
 func _maybe_wrap_subckt_only_netlist(slot: Dictionary, source_label: String) -> Dictionary:
+	# A library-style single .subckt deck cannot run by itself, so generate a
+	# tiny top-level transient testbench when the UI needs a runnable target.
 	if bool(slot.get("autogenerated_wrapper", false)):
 		return slot
 	var ext := str(slot.get("ext", "")).to_lower()
@@ -1176,6 +1263,8 @@ func _maybe_wrap_subckt_only_netlist(slot: Dictionary, source_label: String) -> 
 	return wrapper_slot
 
 func _build_smoke_test_wrapper(slot: Dictionary, analysis: Dictionary) -> String:
+	# Build the minimum ngspice deck needed to instantiate a subcircuit and run a
+	# long transient, giving the visualizer something live to observe.
 	var source_path := str(slot.get("user_path", ""))
 	var fa := FileAccess.open(source_path, FileAccess.READ)
 	if fa == null:
@@ -1324,6 +1413,9 @@ func _wrapper_element_name(prefix: String, port: String) -> String:
 
 # -------------------------------------------------------------------
 # Web queue polling
+# Browser builds cannot use native FileDialog bytes directly. upload_bridge.js
+# pushes JSON/base64 payloads into window.godotUploadQueue, and this section
+# drains that queue into the same _stage_bytes() path used by desktop.
 # -------------------------------------------------------------------
 
 func _poll_web_queue() -> void:
@@ -1360,6 +1452,8 @@ func _poll_web_queue() -> void:
 	_set_error("Web upload: unrecognized queue item.")
 
 func _handle_web_batch(items: Array) -> void:
+	# Batches preserve a single picker/drop gesture so validation can reject
+	# impossible combinations before partially staging them.
 	var schematic_count := 0
 	var symbol_count := 0
 	var spice_count := 0
@@ -1406,6 +1500,8 @@ func _handle_web_batch(items: Array) -> void:
 		_refresh_status("web: staged %d file(s)" % added, StatusTone.OK)
 
 func _looks_like_workspace_zip(filename: String, bytes: PackedByteArray) -> bool:
+	# Workspaces use the same browser picker as uploads, so identify them by
+	# extension plus the ZIP magic number before normal file staging.
 	var lower := filename.to_lower()
 	if not (lower.ends_with(WORKSPACE_EXT) or lower.ends_with(".zip")):
 		return false
@@ -1419,9 +1515,14 @@ func _web_eval_bool(expr: String) -> bool:
 
 # -------------------------------------------------------------------
 # Run simulation
+# The Run button consumes one complete project, applies any temporary file
+# patches needed for support includes or switch state, then hands a single
+# SPICE path to CircuitSimulator.run_continuous().
 # -------------------------------------------------------------------
 
 func _on_run_pressed() -> void:
+	# Only projects with a runnable SPICE slot can be run; schematics alone must
+	# finish xschem2spice generation first.
 	var complete: Array[Dictionary] = []
 	for proj in projects:
 		if proj["complete"]:
@@ -1462,6 +1563,8 @@ func _on_run_pressed() -> void:
 	var sim_path := spice_user_path if OS.has_feature("web") else ProjectSettings.globalize_path(spice_user_path)
 
 	if OS.has_feature("web"):
+		# The browser build needs model files copied into user:// before ngspice
+		# can resolve Sky130 includes from an uploaded/generated deck.
 		if _pdk_manifest == null:
 			_set_error("Sky130 PDK manifest is not ready yet. Wait for the PDK manifest to load, then run again.")
 			return
@@ -1480,6 +1583,8 @@ func _on_run_pressed() -> void:
 		_set_error("run_continuous() failed.")
 		return
 
+	# Reapply the current UI switch state after ngspice has loaded the deck and
+	# discovered its EXTERNAL voltage sources.
 	if _sim.has_method("set_switch_voltage"):
 		var sw_states: Dictionary = selected_proj.get("switch_states", {})
 		for btn_name_v in sw_states:
@@ -1491,6 +1596,8 @@ func _on_run_pressed() -> void:
 
 
 func _on_stop_reset_pressed() -> void:
+	# Stop/reset is one user action because ngspice state can persist between
+	# runs unless the native node explicitly resets or is replaced.
 	_sim = _resolve_simulator()
 	if _sim == null:
 		_set_error("Could not find CircuitSimulator node.")
@@ -1521,6 +1628,8 @@ func _on_stop_reset_pressed() -> void:
 
 
 func _replace_legacy_simulator(old_sim: Node) -> Node:
+	# Older fallback nodes may only support stop_continuous(); replacing the node
+	# gives the UI a clean simulator state without changing the public button.
 	var parent := old_sim.get_parent()
 	var replacement_name := str(old_sim.name)
 	if parent == null:
@@ -1546,6 +1655,8 @@ func _replace_legacy_simulator(old_sim: Node) -> Node:
 
 
 func _notify_simulator_replaced(simulator: Node) -> void:
+	# Visualizer nodes keep simulator references too, so broadcast the
+	# replacement and clear any stale visual simulation state.
 	var root := get_tree().root
 	if root == null:
 		return
@@ -1561,6 +1672,8 @@ func _notify_simulator_replaced(simulator: Node) -> void:
 
 
 func _log_spice_run_context(spice_entry: Dictionary) -> void:
+	# Console breadcrumb for the run target. The preview highlights includes and
+	# device/subcircuit lines most likely to explain a failed simulation.
 	var user_path := str(spice_entry.get("user_path", ""))
 	var byte_count := int(spice_entry.get("bytes", 0))
 	_log("[color=#336699][b]Info:[/b][/color] Running SPICE file: %s (%d bytes)." % [
@@ -1592,6 +1705,8 @@ func _log_spice_run_context(spice_entry: Dictionary) -> void:
 
 
 func _ensure_web_pdk_models_ready() -> bool:
+	# Cache PDK model files into user:// once per session so uploaded/generated
+	# decks can include them through the fixed web PDK root.
 	if _pdk_models_ready:
 		return true
 	if _pdk_manifest == null:
@@ -1683,6 +1798,8 @@ func _on_sim_finished() -> void:
 
 # -------------------------------------------------------------------
 # Project cards
+# Cards are the visible file workspace. They are rebuilt from the project model
+# whenever staging, selection, dependency state, or theme state changes.
 # -------------------------------------------------------------------
 
 func _rebuild_cards() -> void:
@@ -1693,6 +1810,8 @@ func _rebuild_cards() -> void:
 		project_cards.add_child(_build_project_card(i, projects[i]))
 
 func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
+	# The card doubles as a project selector and a compact summary of runnable
+	# SPICE, source schematic, dependency status, and live switch controls.
 	var card := PanelContainer.new()
 	var is_selected := (idx == _selected_project)
 	var normal_style := (_sb_card_selected if is_selected else _sb_card).duplicate() as StyleBoxFlat
@@ -1821,6 +1940,8 @@ func _build_project_card(idx: int, proj: Dictionary) -> PanelContainer:
 	return card
 
 func _build_dependency_error_badge(report: Dictionary) -> Control:
+	# Keep the card compact while putting the full dependency problem in the
+	# tooltip for the user to inspect.
 	var badge := PanelContainer.new()
 	badge.mouse_filter = Control.MOUSE_FILTER_STOP
 	badge.tooltip_text = _dependency_error_tooltip(report)
@@ -1868,6 +1989,8 @@ func _dependency_error_tooltip(report: Dictionary) -> String:
 	return "\n".join(parts)
 
 func _build_slot_control(proj_idx: int, slot_key: String, slot_data: Variant) -> Control:
+	# A filled slot is passive text; an empty slot is a plus button that routes
+	# the next upload into this exact project field.
 	if slot_data != null:
 		var container := PanelContainer.new()
 		container.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1912,6 +2035,8 @@ func _on_card_gui_input(event: InputEvent, idx: int) -> void:
 
 
 func _show_selected_project_schematic_if_idle(idx: int) -> void:
+	# Selecting a project also refreshes the 3D schematic view, but only while a
+	# simulation is not actively driving the visualizer.
 	if idx < 0 or idx >= projects.size():
 		return
 	if _is_simulation_running():
@@ -1935,6 +2060,8 @@ func _is_simulation_running() -> bool:
 	return false
 
 func _on_output_box_gui_input(event: InputEvent) -> void:
+	# Let the console consume wheel/pan events so scrolling log output does not
+	# also move the surrounding 3D/editor viewport.
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_WHEEL_UP \
@@ -1946,6 +2073,8 @@ func _on_output_box_gui_input(event: InputEvent) -> void:
 		output_box.accept_event()
 
 func _on_switch_toggled(proj_idx: int, btn_name: String, on: bool) -> void:
+	# UI switch state is stored with the selected project and, when possible,
+	# pushed live to ngspice through the EXTERNAL source bridge.
 	if proj_idx < 0 or proj_idx >= projects.size():
 		return
 	var sw: Dictionary = projects[proj_idx].get("switch_states", {})
@@ -1960,6 +2089,8 @@ func _on_switch_toggled(proj_idx: int, btn_name: String, on: bool) -> void:
 
 
 func set_switch_state_from_scene(btn_name: String, on: bool) -> void:
+	# Called by scene-side button components so the side panel stays in sync
+	# when the user interacts with the 3D schematic instead of the card toggle.
 	var proj_idx := _selected_project
 	if proj_idx < 0 or proj_idx >= projects.size() or not _project_has_button(proj_idx, btn_name):
 		proj_idx = _find_project_with_button(btn_name)
@@ -1975,6 +2106,8 @@ func set_switch_state_from_scene(btn_name: String, on: bool) -> void:
 
 
 func get_switch_state_for_scene(btn_name: String) -> bool:
+	# Scene code asks here before drawing a button state; selected project wins,
+	# with a fallback search for the first project containing that button.
 	var proj_idx := _selected_project
 	if proj_idx < 0 or proj_idx >= projects.size() or not _project_has_button(proj_idx, btn_name):
 		proj_idx = _find_project_with_button(btn_name)
@@ -1998,6 +2131,7 @@ func _project_has_button(proj_idx: int, btn_name: String) -> bool:
 	return buttons.has(btn_name)
 
 func _on_slot_plus_pressed(proj_idx: int, slot_key: String) -> void:
+	# The plus button arms a one-file picker flow for a specific project slot.
 	_pending_slot_project = proj_idx
 	_pending_slot_key = slot_key
 	var proj_name := str(projects[proj_idx]["name"])
@@ -2018,6 +2152,8 @@ func _on_slot_plus_pressed(proj_idx: int, slot_key: String) -> void:
 # -------------------------------------------------------------------
 
 func _on_clear_pressed() -> void:
+	# Clear only the staged UI model and console; uploaded files in user:// may
+	# remain on disk until overwritten or ignored by future sessions.
 	projects.clear()
 	support_files.clear()
 	_selected_project = -1
@@ -2031,6 +2167,9 @@ func _on_clear_pressed() -> void:
 
 # -------------------------------------------------------------------
 # Workspace save / load
+# Workspaces persist the current side-panel file workspace. They are zips with
+# a manifest plus staged file bytes, so they can round-trip between desktop and
+# browser without relying on original host paths.
 # -------------------------------------------------------------------
 
 func _on_save_workspace_pressed() -> void:
@@ -2116,6 +2255,8 @@ func _save_workspace_zip_to_path(path: String) -> void:
 		_log("[color=darkgreen][b]OK:[/b][/color] Saved workspace %s" % zip_path)
 
 func _build_workspace_manifest_for_zip() -> Dictionary:
+	# The manifest records display names and zip-relative paths. Runtime user://
+	# paths are included only to locate the currently staged bytes while writing.
 	var used: Dictionary = {}
 	var proj_list: Array = []
 	for proj in projects:
@@ -2184,6 +2325,8 @@ func _save_workspace_zip_to_user_path(zip_user_path: String) -> bool:
 	return _write_manifest_and_files(writer)
 
 func _write_manifest_and_files(writer: ZIPPacker) -> bool:
+	# Write the manifest first, then every project slot and support file it
+	# references. The writer is closed on both success and failure paths.
 	var manifest := _build_workspace_manifest_for_zip()
 	var err := writer.start_file(WORKSPACE_MANIFEST)
 	if err != OK:
@@ -2255,6 +2398,8 @@ func _write_manifest_and_files(writer: ZIPPacker) -> bool:
 	return true
 
 func _load_workspace_zip_from_path(path: String) -> void:
+	# Restore files into fresh user://uploads paths and rebuild the in-memory
+	# project model rather than trusting paths captured in the archive.
 	if not path.to_lower().ends_with(".zip"):
 		_set_error("Not a zip file: %s" % path)
 		return
@@ -2400,6 +2545,8 @@ func _load_workspace_zip_from_path(path: String) -> void:
 	_log("[color=darkgreen][b]OK:[/b][/color] Loaded workspace (%d projects)." % projects.size())
 
 func _load_workspace_zip_from_bytes(bytes: PackedByteArray) -> bool:
+	# Web workspace loads arrive as bytes from the upload bridge; write them to a
+	# temporary user:// zip so ZIPReader can use the normal load path.
 	var tmp_path := "user://incoming_workspace_%d%s" % [int(Time.get_unix_time_from_system()), WORKSPACE_EXT]
 	var f := FileAccess.open(tmp_path, FileAccess.WRITE)
 	if f == null:
@@ -2412,9 +2559,13 @@ func _load_workspace_zip_from_bytes(bytes: PackedByteArray) -> bool:
 
 # -------------------------------------------------------------------
 # Button / switch helpers
+# xschem button symbols are mirrored into per-project switch state and, during
+# simulation, into ngspice EXTERNAL voltage sources.
 # -------------------------------------------------------------------
 
 func _parse_buttons_from_sch(user_path: String) -> Array:
+	# Use the native schematic parser when available so button detection matches
+	# the visualizer's interpretation of the same .sch file.
 	if user_path == "":
 		return []
 	if not ClassDB.class_exists("SchParser"):
@@ -2434,6 +2585,8 @@ func _parse_buttons_from_sch(user_path: String) -> Array:
 	return buttons
 
 func _patch_spice_for_switches(user_path: String, switch_states: Dictionary) -> String:
+	# Legacy fallback: create a temporary deck with EXTERNAL sources replaced by
+	# fixed DC values. The live C++ bridge supersedes this when available.
 	var fa := FileAccess.open(user_path, FileAccess.READ)
 	if fa == null:
 		return ""
@@ -2467,6 +2620,8 @@ func _patch_spice_for_switches(user_path: String, switch_states: Dictionary) -> 
 	return tmp_path
 
 func _patch_spice_for_subcircuit_support(user_path: String, proj: Dictionary) -> String:
+	# If support files were uploaded separately, generate a temporary run deck
+	# that includes only the support files needed by this project's missing calls.
 	var root_entry_v: Variant = proj.get("spice", null)
 	if typeof(root_entry_v) != TYPE_DICTIONARY:
 		return ""
@@ -2531,6 +2686,8 @@ func _patch_spice_for_subcircuit_support(user_path: String, proj: Dictionary) ->
 # -------------------------------------------------------------------
 
 func _resolve_simulator() -> Node:
+	# Prefer the configured simulator path, then walk outward/global so the side
+	# panel can work in both the main scene and upload harness.
 	if simulator_path != NodePath("") and has_node(simulator_path):
 		var n0: Node = get_node(simulator_path)
 		if n0 != null and n0.has_method("run_continuous"):
@@ -2594,6 +2751,7 @@ func _human_size(n: int) -> String:
 	return "%.2f MB" % (float(n) / (1024.0 * 1024.0))
 
 func _refresh_status(msg: String, tone: StatusTone = StatusTone.IDLE) -> void:
+	# Short status bar message with tone color; richer history goes to _log().
 	_last_status_msg = msg
 	_last_status_tone = tone
 	status_prefix.text = "Status:"
@@ -2615,10 +2773,12 @@ func _refresh_status(msg: String, tone: StatusTone = StatusTone.IDLE) -> void:
 	status_value.add_theme_color_override("font_color", c)
 
 func _set_error(msg: String) -> void:
+	# Errors always update both feedback surfaces: compact status plus console.
 	_refresh_status("error", StatusTone.ERROR)
 	_log("[color=#cc2200][b]Error:[/b][/color] %s" % msg)
 
 func _log(bb: String) -> void:
+	# Console accepts BBCode so upload/run results can be scanned by severity.
 	output_box.append_text(bb + "\n")
 	output_box.scroll_to_line(output_box.get_line_count())
 
@@ -2627,6 +2787,7 @@ func _log(bb: String) -> void:
 # -------------------------------------------------------------------
 
 func _ensure_ws_name_popup() -> void:
+	# Shared save-name prompt used before native save dialogs and web downloads.
 	if _ws_name_dialog != null:
 		return
 	_ws_name_dialog = AcceptDialog.new()
@@ -2653,6 +2814,8 @@ func _ensure_ws_name_popup() -> void:
 # -------------------------------------------------------------------
 
 func _on_theme_toggle_pressed() -> void:
+	# Rebuild dynamic cards after theme changes because their controls are
+	# created in code rather than all coming from the .tscn tree.
 	_dark_mode = not _dark_mode
 	_apply_theme()
 	_rebuild_cards()
@@ -2667,6 +2830,8 @@ func is_dark_mode() -> bool:
 # -------------------------------------------------------------------
 
 func _apply_theme() -> void:
+	# The side panel uses one runtime Theme for static scene controls and stores
+	# matching StyleBoxes for project cards created after uploads.
 	_t = Theme.new()
 
 	var xp_face: Color
@@ -2896,6 +3061,7 @@ func _apply_theme() -> void:
 		output_box.add_theme_color_override("default_color", xp_text)
 
 func _flash_drop_zone() -> void:
+	# Brief visual acknowledgement after a successful drop/upload batch.
 	drop_zone.add_theme_stylebox_override("panel", _sb_drop_flash)
 	drop_title.text = "Dropped, staging..."
 	await get_tree().create_timer(0.35).timeout

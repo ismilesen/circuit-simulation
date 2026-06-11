@@ -1,5 +1,10 @@
 class_name SidebarPanel extends Control
 
+## Animated shell for the side-panel workbench.
+## The upload panel owns the actual upload/workspace/console/simulation UI;
+## this wrapper only manages slide/collapse layout and forwards public signals
+## so scene code does not need to know the upload panel's internal node paths.
+
 signal schematic_requested(path: String)
 signal spice_paired(path: String)
 signal pdk_component_selected(component: Dictionary)
@@ -42,6 +47,8 @@ func _notification(what: int) -> void:
 
 
 func _setup_panel() -> void:
+	# Instantiate the real side-panel UI and pin it to the wrapper's left edge;
+	# _sync_layout() keeps its width large enough for the child content.
 	var packed = load(UPLOAD_PANEL_SCENE)
 	if packed == null:
 		push_warning("Upload panel scene not found at: " + UPLOAD_PANEL_SCENE)
@@ -66,6 +73,8 @@ func _setup_panel() -> void:
 	if _upload_panel.has_signal("pdk_component_selected"):
 		_upload_panel.pdk_component_selected.connect(func(component: Dictionary): pdk_component_selected.emit(component))
 
+	# The PDK manifest can arrive before the child scene is ready, so replay it
+	# once the upload panel has been instantiated.
 	if _pending_pdk_manifest != null and _upload_panel.has_method("set_pdk_manifest"):
 		_upload_panel.set_pdk_manifest(_pending_pdk_manifest)
 
@@ -77,17 +86,21 @@ func set_pdk_manifest(manifest: Variant) -> void:
 
 
 func set_switch_state_from_scene(btn_name: String, on: bool) -> void:
+	# Forward physical-scene button state into the upload panel's project model.
 	if _upload_panel != null and _upload_panel.has_method("set_switch_state_from_scene"):
 		_upload_panel.call("set_switch_state_from_scene", btn_name, on)
 
 
 func get_switch_state_for_scene(btn_name: String) -> bool:
+	# Let the 3D scene query the side panel without coupling to UploadPanel.
 	if _upload_panel != null and _upload_panel.has_method("get_switch_state_for_scene"):
 		return bool(_upload_panel.call("get_switch_state_for_scene", btn_name))
 	return false
 
 
 func _setup_toggle_button() -> void:
+	# The toggle lives outside the sliding panel so it remains reachable when
+	# the side panel is collapsed.
 	_toggle_button = Button.new()
 	_toggle_button.name = "ToggleSidebar"
 	_toggle_button.text = "<"
@@ -145,6 +158,8 @@ func _on_toggle() -> void:
 
 
 func _sync_layout(force_position: bool = true) -> void:
+	# Measure the child panel each pass; dynamic controls such as project cards,
+	# status text, and workspace rows can change the minimum readable width.
 	var target_width := _calculate_panel_width()
 	if not force_position and is_equal_approx(target_width, _panel_width):
 		return
